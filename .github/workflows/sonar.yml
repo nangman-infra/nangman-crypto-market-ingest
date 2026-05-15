@@ -63,6 +63,11 @@ jobs:
           mkdir -p sonar-reports
           cargo clippy --all-targets --message-format=json --quiet > sonar-reports/clippy.json
 
+      - name: Generate coverage report for SonarQube
+        run: |
+          cargo install cargo-llvm-cov --locked
+          cargo llvm-cov --all-targets --lcov --output-path sonar-reports/lcov.info
+
       - name: Run SonarQube scan
         uses: SonarSource/sonarqube-scan-action@v7
         with:
