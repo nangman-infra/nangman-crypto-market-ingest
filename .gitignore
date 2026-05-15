@@ -1,4 +1,5 @@
 target/
+sonar-reports/
 .env
 .DS_Store
 *.pem

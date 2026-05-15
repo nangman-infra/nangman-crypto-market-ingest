@@ -1,0 +1,133 @@
+name: SonarQube
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.94.0"
+
+jobs:
+  quality-checks:
+    name: Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt --component clippy
+          rustup default "${RUST_TOOLCHAIN}"
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+
+      - name: Run Rust fmt gate
+        run: cargo fmt --all --check
+
+      - name: Run Clippy gate
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Rust test gate
+        run: cargo test --all-targets
+
+  sonarqube:
+    name: SonarQube Scan
+    needs: quality-checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component clippy
+          rustup default "${RUST_TOOLCHAIN}"
+          cargo --version
+          cargo clippy --version
+
+      - name: Generate Clippy report for SonarQube
+        run: |
+          mkdir -p sonar-reports
+          cargo clippy --all-targets --message-format=json --quiet > sonar-reports/clippy.json
+
+      - name: Run SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@v7
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=600
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL != '' && vars.SONAR_HOST_URL || secrets.SONAR_HOST_URL }}
+
+      - name: Print SonarQube quality gate details
+        if: failure()
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL != '' && vars.SONAR_HOST_URL || secrets.SONAR_HOST_URL }}
+        run: |
+          task_file=".scannerwork/report-task.txt"
+          if [ ! -f "${task_file}" ]; then
+            echo "SonarQube task metadata was not generated."
+            exit 0
+          fi
+
+          ce_task_id="$(awk -F= '/^ceTaskId=/ { print $2 }' "${task_file}")"
+          if [ -z "${ce_task_id}" ]; then
+            echo "SonarQube task id was not found."
+            exit 0
+          fi
+
+          task_json="$(curl --fail --silent --user "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/ce/task?id=${ce_task_id}")"
+          analysis_id="$(python3 -c 'import json, sys; print(json.load(sys.stdin).get("task", {}).get("analysisId", ""))' <<< "${task_json}")"
+          if [ -z "${analysis_id}" ]; then
+            echo "SonarQube analysis id was not available yet."
+            exit 0
+          fi
+
+          gate_json="$(curl --fail --silent --user "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/qualitygates/project_status?analysisId=${analysis_id}")"
+          python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          status = data.get("projectStatus", {})
+          print("SonarQube quality gate: {}".format(status.get("status", "UNKNOWN")))
+          for condition in status.get("conditions", []):
+              print(
+                  "{}: {} actual={} threshold={} comparator={}".format(
+                      condition.get("status", "UNKNOWN"),
+                      condition.get("metricKey", "unknown_metric"),
+                      condition.get("actualValue", "n/a"),
+                      condition.get("errorThreshold", "n/a"),
+                      condition.get("comparator", "n/a"),
+                  )
+              )
+          ' <<< "${gate_json}"
+
+          issues_json="$(curl --fail --silent --user "${SONAR_TOKEN}:" --get "${SONAR_HOST_URL}/api/issues/search" --data-urlencode "componentKeys=nangman-crypto-market-ingest" --data-urlencode "resolved=false" --data-urlencode "inNewCodePeriod=true" --data-urlencode "ps=20")"
+          python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          for issue in data.get("issues", []):
+              location = "{}:{}".format(issue.get("component", "unknown"), issue.get("line", "n/a"))
+              print(
+                  "SonarQube issue: {} {} {} {}".format(
+                      issue.get("severity", "UNKNOWN"),
+                      issue.get("rule", "unknown-rule"),
+                      location,
+                      issue.get("message", ""),
+                  )
+              )
+          ' <<< "${issues_json}"
