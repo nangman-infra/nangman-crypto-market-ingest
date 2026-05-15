@@ -212,36 +212,20 @@ async fn backfill_symbol(
             break;
         }
 
-        let mut reached_start = false;
-        for trade in &page {
-            if trade.timestamp > input_end_ms {
-                continue;
-            }
-            if trade.timestamp < input_start_ms {
-                reached_start = true;
-                continue;
-            }
-            sink.append_raw_market_event(raw_trade_draft(market, trade)?)
-                .await
-                .map_err(|error| BackfillError::Storage(error.to_string()))?;
-            report.observe(trade.timestamp);
-        }
-
-        if reached_start {
+        if append_page_trades(
+            &page,
+            market,
+            input_start_ms,
+            input_end_ms,
+            sink,
+            &mut report,
+        )
+        .await?
+        {
             break;
         }
 
-        let Some(last_trade) = page.last() else {
-            break;
-        };
-        let next_candidate = last_trade.sequential_id;
-        if next_cursor == Some(next_candidate) {
-            return Err(BackfillError::InvalidConfig(format!(
-                "Upbit cursor did not advance for {}",
-                market.market
-            )));
-        }
-        next_cursor = Some(next_candidate);
+        next_cursor = advance_cursor(&page, next_cursor, &market.market)?;
         first_page = false;
         if page.len() < UPBIT_PAGE_LIMIT {
             break;
@@ -260,6 +244,48 @@ async fn backfill_symbol(
         .await?;
     }
     Ok(report)
+}
+
+async fn append_page_trades(
+    page: &[UpbitTrade],
+    market: &UpbitBackfillMarket,
+    input_start_ms: i64,
+    input_end_ms: i64,
+    sink: &mut L0StorageSink,
+    report: &mut SymbolBackfillReport,
+) -> Result<bool, BackfillError> {
+    let mut reached_start = false;
+    for trade in page {
+        if trade.timestamp > input_end_ms {
+            continue;
+        }
+        if trade.timestamp < input_start_ms {
+            reached_start = true;
+            continue;
+        }
+        sink.append_raw_market_event(raw_trade_draft(market, trade)?)
+            .await
+            .map_err(|error| BackfillError::Storage(error.to_string()))?;
+        report.observe(trade.timestamp);
+    }
+    Ok(reached_start)
+}
+
+fn advance_cursor(
+    page: &[UpbitTrade],
+    current_cursor: Option<i64>,
+    market: &str,
+) -> Result<Option<i64>, BackfillError> {
+    let Some(last_trade) = page.last() else {
+        return Ok(current_cursor);
+    };
+    let next_cursor = last_trade.sequential_id;
+    if current_cursor == Some(next_cursor) {
+        return Err(BackfillError::InvalidConfig(format!(
+            "Upbit cursor did not advance for {market}"
+        )));
+    }
+    Ok(Some(next_cursor))
 }
 
 async fn fetch_trade_page(

@@ -49,11 +49,11 @@ where
         match timeout_at(wait_until, websocket.next()).await {
             Ok(Some(message)) => {
                 let message = message?;
-                match message {
-                    tungstenite::Message::Text(text) => {
+                match classify_websocket_message(message, &mut stats, false)? {
+                    IngestWebSocketMessage::Payload(text) => {
                         observe_binance_ingest_payload(
                             config,
-                            text.as_ref(),
+                            &text,
                             now_ms()?,
                             decision_trace_id,
                             &mut last_sequence_by_stream,
@@ -61,55 +61,17 @@ where
                         );
                         decision_trace_id += 1;
                     }
-                    tungstenite::Message::Binary(bytes) => {
-                        let text = str::from_utf8(bytes.as_ref()).map_err(|error| {
-                            MarketDataError::InvalidMessage(format!(
-                                "binary websocket payload is not utf-8: {error}"
-                            ))
-                        })?;
-                        observe_binance_ingest_payload(
-                            config,
-                            text,
-                            now_ms()?,
-                            decision_trace_id,
-                            &mut last_sequence_by_stream,
-                            &mut stats,
-                        );
-                        decision_trace_id += 1;
-                    }
-                    tungstenite::Message::Ping(payload) => {
-                        stats.control_messages += 1;
-                        stats.pings_received += 1;
+                    IngestWebSocketMessage::Pong(payload) => {
                         websocket.send(tungstenite::Message::Pong(payload)).await?;
                     }
-                    tungstenite::Message::Pong(_) => {
-                        stats.control_messages += 1;
-                        stats.pongs_received += 1;
-                    }
-                    tungstenite::Message::Close(_) => {
-                        stats.control_messages += 1;
-                        stats.close_messages += 1;
-                        break;
-                    }
-                    tungstenite::Message::Frame(_) => {
-                        stats.control_messages += 1;
-                    }
+                    IngestWebSocketMessage::Closed => break,
+                    IngestWebSocketMessage::Control => {}
                 }
-                if Instant::now() >= next_log {
-                    on_log(&stats);
-                    while next_log <= Instant::now() {
-                        next_log += log_interval;
-                    }
-                }
+                advance_log_if_due(&mut next_log, log_interval, || on_log(&stats));
             }
             Ok(None) => break,
             Err(_) => {
-                if Instant::now() >= next_log {
-                    on_log(&stats);
-                    while next_log <= Instant::now() {
-                        next_log += log_interval;
-                    }
-                }
+                advance_log_if_due(&mut next_log, log_interval, || on_log(&stats));
             }
         }
     }
@@ -153,13 +115,13 @@ where
         match timeout_at(wait_until, websocket.next()).await {
             Ok(Some(message)) => {
                 let message = message?;
-                match message {
-                    tungstenite::Message::Text(text) => {
+                match classify_websocket_message(message, &mut stats, true)? {
+                    IngestWebSocketMessage::Payload(text) => {
                         observe_binance_ingest_payload_with_depth_sync(
                             config,
                             depth_sync,
                             &http_client,
-                            text.as_ref(),
+                            &text,
                             now_ms()?,
                             decision_trace_id,
                             DepthObserveState {
@@ -172,57 +134,18 @@ where
                         .await?;
                         decision_trace_id += 1;
                     }
-                    tungstenite::Message::Binary(bytes) => {
-                        let text = str::from_utf8(bytes.as_ref()).map_err(|error| {
-                            MarketDataError::InvalidMessage(format!(
-                                "binary websocket payload is not utf-8: {error}"
-                            ))
-                        })?;
-                        observe_binance_ingest_payload_with_depth_sync(
-                            config,
-                            depth_sync,
-                            &http_client,
-                            text,
-                            now_ms()?,
-                            decision_trace_id,
-                            DepthObserveState {
-                                last_sequence_by_stream: &mut last_sequence_by_stream,
-                                books: &mut books,
-                                snapshot_attempted: &mut snapshot_attempted,
-                                stats: &mut stats,
-                            },
-                        )
-                        .await?;
-                        decision_trace_id += 1;
-                    }
-                    tungstenite::Message::Ping(payload) => {
-                        stats.control_messages += 1;
-                        stats.pings_received += 1;
-                        stats.source_health_status = "connected".to_owned();
+                    IngestWebSocketMessage::Pong(payload) => {
                         websocket.send(tungstenite::Message::Pong(payload)).await?;
                     }
-                    tungstenite::Message::Pong(_) => {
-                        stats.control_messages += 1;
-                        stats.pongs_received += 1;
-                    }
-                    tungstenite::Message::Close(_) => {
-                        stats.control_messages += 1;
-                        stats.close_messages += 1;
-                        stats.source_health_status = "closed".to_owned();
-                        stats.source_health_events += 1;
+                    IngestWebSocketMessage::Closed => {
                         break;
                     }
-                    tungstenite::Message::Frame(_) => {
-                        stats.control_messages += 1;
-                    }
+                    IngestWebSocketMessage::Control => {}
                 }
                 stats.update_depth_book_counts(&books);
-                if Instant::now() >= next_log {
+                advance_log_if_due(&mut next_log, log_interval, || {
                     on_log(&stats);
-                    while next_log <= Instant::now() {
-                        next_log += log_interval;
-                    }
-                }
+                });
             }
             Ok(None) => {
                 stats.source_health_status = "ended".to_owned();
@@ -232,13 +155,10 @@ where
             Err(_) => {
                 stats.source_health_status = "waiting_for_messages".to_owned();
                 stats.source_health_events += 1;
-                if Instant::now() >= next_log {
+                advance_log_if_due(&mut next_log, log_interval, || {
                     stats.update_depth_book_counts(&books);
                     on_log(&stats);
-                    while next_log <= Instant::now() {
-                        next_log += log_interval;
-                    }
-                }
+                });
             }
         }
     }
@@ -246,6 +166,67 @@ where
     stats.update_depth_book_counts(&books);
     on_log(&stats);
     Ok(stats)
+}
+
+enum IngestWebSocketMessage {
+    Payload(String),
+    Pong(tungstenite::Bytes),
+    Closed,
+    Control,
+}
+
+fn classify_websocket_message(
+    message: tungstenite::Message,
+    stats: &mut BinanceIngestWatchStats,
+    track_source_health: bool,
+) -> Result<IngestWebSocketMessage, MarketDataError> {
+    match message {
+        tungstenite::Message::Text(text) => Ok(IngestWebSocketMessage::Payload(text.to_string())),
+        tungstenite::Message::Binary(bytes) => {
+            let text = str::from_utf8(bytes.as_ref()).map_err(|error| {
+                MarketDataError::InvalidMessage(format!(
+                    "binary websocket payload is not utf-8: {error}"
+                ))
+            })?;
+            Ok(IngestWebSocketMessage::Payload(text.to_owned()))
+        }
+        tungstenite::Message::Ping(payload) => {
+            stats.control_messages += 1;
+            stats.pings_received += 1;
+            if track_source_health {
+                stats.source_health_status = "connected".to_owned();
+            }
+            Ok(IngestWebSocketMessage::Pong(payload))
+        }
+        tungstenite::Message::Pong(_) => {
+            stats.control_messages += 1;
+            stats.pongs_received += 1;
+            Ok(IngestWebSocketMessage::Control)
+        }
+        tungstenite::Message::Close(_) => {
+            stats.control_messages += 1;
+            stats.close_messages += 1;
+            if track_source_health {
+                stats.source_health_status = "closed".to_owned();
+                stats.source_health_events += 1;
+            }
+            Ok(IngestWebSocketMessage::Closed)
+        }
+        tungstenite::Message::Frame(_) => {
+            stats.control_messages += 1;
+            Ok(IngestWebSocketMessage::Control)
+        }
+    }
+}
+
+fn advance_log_if_due(next_log: &mut Instant, log_interval: Duration, mut on_due: impl FnMut()) {
+    if Instant::now() < *next_log {
+        return;
+    }
+    on_due();
+    while *next_log <= Instant::now() {
+        *next_log += log_interval;
+    }
 }
 
 pub(crate) fn observe_binance_ingest_payload(

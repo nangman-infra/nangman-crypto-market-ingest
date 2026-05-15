@@ -297,6 +297,17 @@ fn validate_report(
     report: &BinanceL0SmokeReport,
     allow_partial_symbol_coverage: bool,
 ) -> Result<(), BinanceIngestError> {
+    validate_message_report(report, allow_partial_symbol_coverage)?;
+    if let Some(storage) = &report.storage {
+        validate_storage_report(report, storage)?;
+    }
+    Ok(())
+}
+
+fn validate_message_report(
+    report: &BinanceL0SmokeReport,
+    allow_partial_symbol_coverage: bool,
+) -> Result<(), BinanceIngestError> {
     if report.received_messages == 0 {
         return Err(BinanceIngestError::InvalidMessage(
             "Binance ingest smoke received zero messages".to_owned(),
@@ -313,45 +324,62 @@ fn validate_report(
             "Binance ingest smoke observed malformed messages".to_owned(),
         ));
     }
-    if let Some(storage) = &report.storage {
-        if storage.failed_upload_count > 0 {
-            return Err(BinanceIngestError::InvalidMessage(format!(
-                "Binance L0 storage exhausted retries for {} uploads",
-                storage.failed_upload_count
-            )));
-        }
-        if storage.record_count == 0 || storage.uploaded_object_count == 0 {
-            return Err(BinanceIngestError::InvalidMessage(
-                "Binance L0 storage produced no objects".to_owned(),
-            ));
-        }
-        if storage.manifest_key.is_none() {
-            return Err(BinanceIngestError::InvalidMessage(
-                "Binance L0 storage did not upload manifest.json".to_owned(),
-            ));
-        }
-        if !storage_has_family(storage, "source_health") {
-            return Err(BinanceIngestError::InvalidMessage(
-                "Binance L0 storage did not upload source_health".to_owned(),
-            ));
-        }
-        if !storage_has_family(storage, "symbol_health") {
-            return Err(BinanceIngestError::InvalidMessage(
-                "Binance L0 storage did not upload symbol_health".to_owned(),
-            ));
-        }
-        if report.gap_alert_count > 0 && !storage_has_family(storage, "gap_alert") {
-            return Err(BinanceIngestError::InvalidMessage(
-                "Binance L0 storage observed gaps but uploaded no gap_alert".to_owned(),
-            ));
-        }
-        if report.depth_snapshot_messages == 0 {
-            return Err(BinanceIngestError::InvalidMessage(
-                "Binance L0 storage did not record REST depth_snapshot events".to_owned(),
-            ));
-        }
+    Ok(())
+}
+
+fn validate_storage_report(
+    report: &BinanceL0SmokeReport,
+    storage: &StorageReport,
+) -> Result<(), BinanceIngestError> {
+    validate_common_storage_report(storage, "Binance")?;
+    if report.gap_alert_count > 0 && !storage_has_family(storage, "gap_alert") {
+        return Err(BinanceIngestError::InvalidMessage(
+            "Binance L0 storage observed gaps but uploaded no gap_alert".to_owned(),
+        ));
+    }
+    if report.depth_snapshot_messages == 0 {
+        return Err(BinanceIngestError::InvalidMessage(
+            "Binance L0 storage did not record REST depth_snapshot events".to_owned(),
+        ));
     }
     Ok(())
+}
+
+fn validate_common_storage_report(
+    storage: &StorageReport,
+    venue: &str,
+) -> Result<(), BinanceIngestError> {
+    if storage.failed_upload_count > 0 {
+        return Err(BinanceIngestError::InvalidMessage(format!(
+            "{venue} L0 storage exhausted retries for {} uploads",
+            storage.failed_upload_count
+        )));
+    }
+    if storage.record_count == 0 || storage.uploaded_object_count == 0 {
+        return Err(BinanceIngestError::InvalidMessage(format!(
+            "{venue} L0 storage produced no objects"
+        )));
+    }
+    if storage.manifest_key.is_none() {
+        return Err(BinanceIngestError::InvalidMessage(format!(
+            "{venue} L0 storage did not upload manifest.json"
+        )));
+    }
+    require_storage_family(storage, venue, "source_health")?;
+    require_storage_family(storage, venue, "symbol_health")
+}
+
+fn require_storage_family(
+    storage: &StorageReport,
+    venue: &str,
+    object_family: &str,
+) -> Result<(), BinanceIngestError> {
+    if storage_has_family(storage, object_family) {
+        return Ok(());
+    }
+    Err(BinanceIngestError::InvalidMessage(format!(
+        "{venue} L0 storage did not upload {object_family}"
+    )))
 }
 
 fn storage_has_family(storage: &StorageReport, object_family: &str) -> bool {

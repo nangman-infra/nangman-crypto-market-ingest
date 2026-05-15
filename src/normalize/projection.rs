@@ -182,70 +182,13 @@ pub fn build_market_feature_delta_summary(
     let rows = grouped
         .into_iter()
         .map(|(key, metrics)| {
-            let mut window_start_ms = i64::MAX;
-            let mut window_end_ms = i64::MIN;
-            let mut row_known_as_of_ms = i64::MIN;
-            let mut missing_reasons = BTreeSet::<String>::new();
-            let mut has_complete = false;
-            let mut has_partial = false;
+            let mut accumulator =
+                MarketFeatureDeltaSummaryAccumulator::new(input_range, known_as_of_ms);
             let metrics = metrics
                 .into_values()
-                .map(|delta| {
-                    window_start_ms = window_start_ms.min(delta.window_start_ms);
-                    window_end_ms = window_end_ms.max(delta.window_end_ms);
-                    row_known_as_of_ms = row_known_as_of_ms.max(delta.known_as_of_ms);
-                    has_complete |= delta.quality_status == "complete";
-                    has_partial |= delta.quality_status == "partial";
-                    for reason in &delta.missing_reasons {
-                        missing_reasons.insert(reason.clone());
-                    }
-                    MarketFeatureDeltaSummaryMetric {
-                        metric_name: delta.metric_name.clone(),
-                        value_now: delta.value_now,
-                        value_15m_ago: delta.value_15m_ago,
-                        value_1h_ago: delta.value_1h_ago,
-                        change_pct_15m: delta.change_pct_15m,
-                        change_pct_1h: delta.change_pct_1h,
-                        price_change_same_window: delta.price_change_same_window,
-                        volume_change_same_window: delta.volume_change_same_window,
-                        oi_price_divergence: delta.oi_price_divergence,
-                        window_start_ms: delta.window_start_ms,
-                        window_end_ms: delta.window_end_ms,
-                        quality_status: delta.quality_status.clone(),
-                    }
-                })
+                .map(|delta| accumulator.observe(delta))
                 .collect::<Vec<_>>();
-            let quality_status = if has_complete {
-                "complete"
-            } else if has_partial {
-                "partial"
-            } else {
-                "insufficient"
-            };
-            MarketFeatureDeltaSummaryRow {
-                venue: key.venue,
-                symbol_native: key.symbol_native,
-                symbol_canonical: key.symbol_canonical,
-                market_type: key.market_type,
-                window_start_ms: if window_start_ms == i64::MAX {
-                    input_range.start_ms
-                } else {
-                    window_start_ms
-                },
-                window_end_ms: if window_end_ms == i64::MIN {
-                    input_range.end_ms
-                } else {
-                    window_end_ms
-                },
-                known_as_of_ms: if row_known_as_of_ms == i64::MIN {
-                    known_as_of_ms
-                } else {
-                    row_known_as_of_ms
-                },
-                quality_status: quality_status.to_owned(),
-                missing_reasons: missing_reasons.into_iter().collect(),
-                metrics,
-            }
+            accumulator.into_row(key, metrics)
         })
         .collect::<Vec<_>>();
 
@@ -269,6 +212,109 @@ pub fn build_market_feature_delta_summary(
     }
 }
 
+struct MarketFeatureDeltaSummaryAccumulator {
+    input_range: InputRange,
+    fallback_known_as_of_ms: i64,
+    window_start_ms: i64,
+    window_end_ms: i64,
+    row_known_as_of_ms: i64,
+    missing_reasons: BTreeSet<String>,
+    has_complete: bool,
+    has_partial: bool,
+}
+
+impl MarketFeatureDeltaSummaryAccumulator {
+    fn new(input_range: InputRange, fallback_known_as_of_ms: i64) -> Self {
+        Self {
+            input_range,
+            fallback_known_as_of_ms,
+            window_start_ms: i64::MAX,
+            window_end_ms: i64::MIN,
+            row_known_as_of_ms: i64::MIN,
+            missing_reasons: BTreeSet::new(),
+            has_complete: false,
+            has_partial: false,
+        }
+    }
+
+    fn observe(&mut self, delta: &MarketFeatureDelta) -> MarketFeatureDeltaSummaryMetric {
+        self.window_start_ms = self.window_start_ms.min(delta.window_start_ms);
+        self.window_end_ms = self.window_end_ms.max(delta.window_end_ms);
+        self.row_known_as_of_ms = self.row_known_as_of_ms.max(delta.known_as_of_ms);
+        self.has_complete |= delta.quality_status == "complete";
+        self.has_partial |= delta.quality_status == "partial";
+        self.missing_reasons
+            .extend(delta.missing_reasons.iter().cloned());
+        MarketFeatureDeltaSummaryMetric {
+            metric_name: delta.metric_name.clone(),
+            value_now: delta.value_now,
+            value_15m_ago: delta.value_15m_ago,
+            value_1h_ago: delta.value_1h_ago,
+            change_pct_15m: delta.change_pct_15m,
+            change_pct_1h: delta.change_pct_1h,
+            price_change_same_window: delta.price_change_same_window,
+            volume_change_same_window: delta.volume_change_same_window,
+            oi_price_divergence: delta.oi_price_divergence,
+            window_start_ms: delta.window_start_ms,
+            window_end_ms: delta.window_end_ms,
+            quality_status: delta.quality_status.clone(),
+        }
+    }
+
+    fn into_row(
+        self,
+        key: MarketFeatureDeltaSummaryKey,
+        metrics: Vec<MarketFeatureDeltaSummaryMetric>,
+    ) -> MarketFeatureDeltaSummaryRow {
+        MarketFeatureDeltaSummaryRow {
+            venue: key.venue,
+            symbol_native: key.symbol_native,
+            symbol_canonical: key.symbol_canonical,
+            market_type: key.market_type,
+            window_start_ms: self.summary_window_start_ms(),
+            window_end_ms: self.summary_window_end_ms(),
+            known_as_of_ms: self.summary_known_as_of_ms(),
+            quality_status: self.quality_status().to_owned(),
+            missing_reasons: self.missing_reasons.into_iter().collect(),
+            metrics,
+        }
+    }
+
+    fn summary_window_start_ms(&self) -> i64 {
+        if self.window_start_ms == i64::MAX {
+            self.input_range.start_ms
+        } else {
+            self.window_start_ms
+        }
+    }
+
+    fn summary_window_end_ms(&self) -> i64 {
+        if self.window_end_ms == i64::MIN {
+            self.input_range.end_ms
+        } else {
+            self.window_end_ms
+        }
+    }
+
+    fn summary_known_as_of_ms(&self) -> i64 {
+        if self.row_known_as_of_ms == i64::MIN {
+            self.fallback_known_as_of_ms
+        } else {
+            self.row_known_as_of_ms
+        }
+    }
+
+    fn quality_status(&self) -> &'static str {
+        if self.has_complete {
+            "complete"
+        } else if self.has_partial {
+            "partial"
+        } else {
+            "insufficient"
+        }
+    }
+}
+
 pub fn build_market_regime_contexts(
     l1_run_id: &str,
     input_range: InputRange,
@@ -281,63 +327,96 @@ pub fn build_market_regime_contexts(
         .iter()
         .filter(|(window_start_ms, _)| **window_start_ms >= input_range.start_ms)
     {
-        let btc_return = samples
-            .iter()
-            .find(|sample| sample.symbol_canonical == "BTC")
-            .map(|sample| sample.return_pct);
-        let eth_return = samples
-            .iter()
-            .find(|sample| sample.symbol_canonical == "ETH")
-            .map(|sample| sample.return_pct);
-        let sector_return = mean(samples.iter().map(|sample| sample.return_pct));
-        let volatility = stddev(samples.iter().map(|sample| sample.return_pct));
-        let correlation_to_btc = rolling_correlation_to_btc(&returns_by_window, *window_start_ms);
-        let mut missing_reasons = Vec::new();
-        if btc_return.is_none() {
-            missing_reasons.push("btc_return_missing".to_owned());
-        }
-        if eth_return.is_none() {
-            missing_reasons.push("eth_return_missing".to_owned());
-        }
-        if sector_return.is_none() {
-            missing_reasons.push("sector_return_missing".to_owned());
-        }
-        if correlation_to_btc.is_none() {
-            missing_reasons.push("correlation_to_btc_insufficient_samples".to_owned());
-        }
-        let quality_status = if missing_reasons.is_empty() {
-            "complete"
-        } else if sector_return.is_some() {
-            "partial"
-        } else {
-            "insufficient"
-        };
-        contexts.push(MarketRegimeContext {
-            schema_version: MARKET_REGIME_CONTEXT_SCHEMA_VERSION.to_owned(),
-            regime_context_id: stable_id(&[
-                l1_run_id,
-                &window_start_ms.to_string(),
-                "market_all_symbols",
-                MARKET_REGIME_CONTEXT_SCHEMA_VERSION,
-            ]),
-            l1_run_id: l1_run_id.to_owned(),
-            scope: "market_all_symbols".to_owned(),
-            window_start_ms: *window_start_ms,
-            window_end_ms: samples
-                .first()
-                .map(|sample| sample.window_end_ms)
-                .unwrap_or_else(|| window_start_ms.saturating_add(1_000)),
-            btc_return_same_window: btc_return,
-            eth_return_same_window: eth_return,
-            sector_return_same_window: sector_return,
-            volatility_regime: volatility_regime(volatility),
-            correlation_to_btc,
+        contexts.push(regime_context_for_window(
+            l1_run_id,
             known_as_of_ms,
-            quality_status: quality_status.to_owned(),
-            missing_reasons,
-        });
+            &returns_by_window,
+            *window_start_ms,
+            samples,
+        ));
     }
     contexts
+}
+
+fn regime_context_for_window(
+    l1_run_id: &str,
+    known_as_of_ms: i64,
+    returns_by_window: &BTreeMap<i64, Vec<ReturnSample>>,
+    window_start_ms: i64,
+    samples: &[ReturnSample],
+) -> MarketRegimeContext {
+    let btc_return = return_for_symbol(samples, "BTC");
+    let eth_return = return_for_symbol(samples, "ETH");
+    let sector_return = mean(samples.iter().map(|sample| sample.return_pct));
+    let volatility = stddev(samples.iter().map(|sample| sample.return_pct));
+    let correlation_to_btc = rolling_correlation_to_btc(returns_by_window, window_start_ms);
+    let missing_reasons =
+        regime_missing_reasons(btc_return, eth_return, sector_return, correlation_to_btc);
+    MarketRegimeContext {
+        schema_version: MARKET_REGIME_CONTEXT_SCHEMA_VERSION.to_owned(),
+        regime_context_id: stable_id(&[
+            l1_run_id,
+            &window_start_ms.to_string(),
+            "market_all_symbols",
+            MARKET_REGIME_CONTEXT_SCHEMA_VERSION,
+        ]),
+        l1_run_id: l1_run_id.to_owned(),
+        scope: "market_all_symbols".to_owned(),
+        window_start_ms,
+        window_end_ms: samples
+            .first()
+            .map(|sample| sample.window_end_ms)
+            .unwrap_or_else(|| window_start_ms.saturating_add(1_000)),
+        btc_return_same_window: btc_return,
+        eth_return_same_window: eth_return,
+        sector_return_same_window: sector_return,
+        volatility_regime: volatility_regime(volatility),
+        correlation_to_btc,
+        known_as_of_ms,
+        quality_status: regime_quality_status(&missing_reasons, sector_return).to_owned(),
+        missing_reasons,
+    }
+}
+
+fn return_for_symbol(samples: &[ReturnSample], symbol: &str) -> Option<f64> {
+    samples
+        .iter()
+        .find(|sample| sample.symbol_canonical == symbol)
+        .map(|sample| sample.return_pct)
+}
+
+fn regime_missing_reasons(
+    btc_return: Option<f64>,
+    eth_return: Option<f64>,
+    sector_return: Option<f64>,
+    correlation_to_btc: Option<f64>,
+) -> Vec<String> {
+    let mut missing_reasons = Vec::new();
+    push_missing_if_none(&mut missing_reasons, btc_return, "btc_return_missing");
+    push_missing_if_none(&mut missing_reasons, eth_return, "eth_return_missing");
+    push_missing_if_none(&mut missing_reasons, sector_return, "sector_return_missing");
+    push_missing_if_none(
+        &mut missing_reasons,
+        correlation_to_btc,
+        "correlation_to_btc_insufficient_samples",
+    );
+    missing_reasons
+}
+
+fn push_missing_if_none<T>(missing_reasons: &mut Vec<String>, value: Option<T>, reason: &str) {
+    if value.is_none() {
+        missing_reasons.push(reason.to_owned());
+    }
+}
+
+fn regime_quality_status(missing_reasons: &[String], sector_return: Option<f64>) -> &'static str {
+    if missing_reasons.is_empty() {
+        "complete"
+    } else if sector_return.is_some() {
+        "partial"
+    } else {
+        "insufficient"
+    }
 }
 
 pub fn build_symbol_universe_snapshot(
@@ -378,27 +457,7 @@ pub fn build_symbol_universe_bootstrap_rollups(
                 window_count: 0,
                 mapping_confidence: "moderate".to_owned(),
             });
-        if row.venue == "upbit" && entry.execution_symbol_native.is_none() {
-            entry.execution_symbol_native = Some(row.symbol_native.clone());
-        }
-        if row.venue == "binance" && entry.reference_symbol_native.is_none() {
-            entry.reference_symbol_native = Some(row.symbol_native.clone());
-        }
-        if entry.execution_symbol_native.is_none() {
-            entry.execution_symbol_native = Some(row.symbol_native.clone());
-        }
-        if entry.reference_symbol_native.is_none() {
-            entry.reference_symbol_native = Some(row.symbol_native.clone());
-        }
-        let traded_notional = price(row).unwrap_or(0.0) * row.trade_volume;
-        if traded_notional.is_finite() && traded_notional > 0.0 {
-            entry.traded_notional_sum += traded_notional;
-        }
-        if let Some(spread_bps) = row.spread_bps.filter(|value| value.is_finite()) {
-            entry.spread_samples.push(spread_bps);
-        }
-        entry.gap_count += row.quality_gap;
-        entry.window_count += 1;
+        entry.observe_slice(row);
     }
 
     let mut by_day = BTreeMap::<i64, Vec<SymbolUniverseBootstrapSymbolStats>>::new();
@@ -629,6 +688,44 @@ struct SymbolStats {
     mapping_confidence: String,
 }
 
+impl SymbolStats {
+    fn from_slice(row: &SliceRow) -> Self {
+        Self {
+            symbol_canonical: row.symbol_canonical.clone(),
+            execution_symbol_native: None,
+            reference_symbol_native: None,
+            observed_traded_notional: 0.0,
+            bootstrap_days_available: 0,
+            median_spread_bps: None,
+            median_traded_notional: None,
+            gap_rate: None,
+            mapping_confidence: "moderate".to_owned(),
+        }
+    }
+
+    fn from_bootstrap(symbol: &SymbolUniverseBootstrapSymbolStats) -> Self {
+        Self {
+            symbol_canonical: symbol.symbol_canonical.clone(),
+            execution_symbol_native: symbol.execution_symbol_native.clone(),
+            reference_symbol_native: symbol.reference_symbol_native.clone(),
+            observed_traded_notional: 0.0,
+            bootstrap_days_available: 0,
+            median_spread_bps: None,
+            median_traded_notional: None,
+            gap_rate: None,
+            mapping_confidence: symbol.mapping_confidence.clone(),
+        }
+    }
+
+    fn observe_native_symbol(&mut self, row: &SliceRow) {
+        assign_native_symbols(
+            row,
+            &mut self.execution_symbol_native,
+            &mut self.reference_symbol_native,
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BootstrapRunSymbolAccumulator {
     symbol_canonical: String,
@@ -642,6 +739,23 @@ struct BootstrapRunSymbolAccumulator {
 }
 
 impl BootstrapRunSymbolAccumulator {
+    fn observe_slice(&mut self, row: &SliceRow) {
+        assign_native_symbols(
+            row,
+            &mut self.execution_symbol_native,
+            &mut self.reference_symbol_native,
+        );
+        let traded_notional = price(row).unwrap_or(0.0) * row.trade_volume;
+        if traded_notional.is_finite() && traded_notional > 0.0 {
+            self.traded_notional_sum += traded_notional;
+        }
+        if let Some(spread_bps) = row.spread_bps.filter(|value| value.is_finite()) {
+            self.spread_samples.push(spread_bps);
+        }
+        self.gap_count += row.quality_gap;
+        self.window_count += 1;
+    }
+
     fn into_symbol_stats(self) -> SymbolUniverseBootstrapSymbolStats {
         SymbolUniverseBootstrapSymbolStats {
             symbol_canonical: self.symbol_canonical,
@@ -664,48 +778,11 @@ fn symbol_stats(slices: &[SliceRow]) -> BTreeMap<String, SymbolStats> {
     for row in slices {
         let entry = stats
             .entry(row.symbol_canonical.clone())
-            .or_insert_with(|| SymbolStats {
-                symbol_canonical: row.symbol_canonical.clone(),
-                execution_symbol_native: None,
-                reference_symbol_native: None,
-                observed_traded_notional: 0.0,
-                bootstrap_days_available: 0,
-                median_spread_bps: None,
-                median_traded_notional: None,
-                gap_rate: None,
-                mapping_confidence: "moderate".to_owned(),
-            });
-        if row.venue == "upbit" && entry.execution_symbol_native.is_none() {
-            entry.execution_symbol_native = Some(row.symbol_native.clone());
-        }
-        if row.venue == "binance" && entry.reference_symbol_native.is_none() {
-            entry.reference_symbol_native = Some(row.symbol_native.clone());
-        }
-        if entry.execution_symbol_native.is_none() {
-            entry.execution_symbol_native = Some(row.symbol_native.clone());
-        }
-        if entry.reference_symbol_native.is_none() {
-            entry.reference_symbol_native = Some(row.symbol_native.clone());
-        }
-        let price = row.mid_price.or(row.last_trade_price).unwrap_or(0.0);
-        let traded_notional = row.trade_volume * price;
-        entry.observed_traded_notional += traded_notional;
-        let day = row.window_start_ms.div_euclid(86_400_000);
-        daily
-            .entry(row.symbol_canonical.clone())
-            .or_default()
-            .entry(day)
-            .or_default()
-            .traded_notional += traded_notional;
-        if let Some(spread_bps) = row.spread_bps.filter(|value| value.is_finite()) {
-            spreads
-                .entry(row.symbol_canonical.clone())
-                .or_default()
-                .push(spread_bps);
-        }
-        let gap_entry = gap_counts.entry(row.symbol_canonical.clone()).or_default();
-        gap_entry.0 += row.quality_gap;
-        gap_entry.1 += 1;
+            .or_insert_with(|| SymbolStats::from_slice(row));
+        entry.observe_native_symbol(row);
+        record_daily_symbol_stats(row, entry, &mut daily);
+        record_symbol_spread(row, &mut spreads);
+        record_symbol_gap(row, &mut gap_counts);
     }
     for (symbol, stat) in &mut stats {
         let daily_notional = daily
@@ -729,6 +806,52 @@ fn symbol_stats(slices: &[SliceRow]) -> BTreeMap<String, SymbolStats> {
         });
     }
     stats
+}
+
+fn assign_native_symbols(
+    row: &SliceRow,
+    execution_symbol_native: &mut Option<String>,
+    reference_symbol_native: &mut Option<String>,
+) {
+    if row.venue == "upbit" && execution_symbol_native.is_none() {
+        *execution_symbol_native = Some(row.symbol_native.clone());
+    }
+    if row.venue == "binance" && reference_symbol_native.is_none() {
+        *reference_symbol_native = Some(row.symbol_native.clone());
+    }
+    execution_symbol_native.get_or_insert_with(|| row.symbol_native.clone());
+    reference_symbol_native.get_or_insert_with(|| row.symbol_native.clone());
+}
+
+fn record_daily_symbol_stats(
+    row: &SliceRow,
+    stat: &mut SymbolStats,
+    daily: &mut BTreeMap<String, BTreeMap<i64, DailySymbolStats>>,
+) {
+    let traded_notional = row.trade_volume * price(row).unwrap_or(0.0);
+    stat.observed_traded_notional += traded_notional;
+    let day = row.window_start_ms.div_euclid(ONE_DAY_MS);
+    daily
+        .entry(row.symbol_canonical.clone())
+        .or_default()
+        .entry(day)
+        .or_default()
+        .traded_notional += traded_notional;
+}
+
+fn record_symbol_spread(row: &SliceRow, spreads: &mut BTreeMap<String, Vec<f64>>) {
+    if let Some(spread_bps) = row.spread_bps.filter(|value| value.is_finite()) {
+        spreads
+            .entry(row.symbol_canonical.clone())
+            .or_default()
+            .push(spread_bps);
+    }
+}
+
+fn record_symbol_gap(row: &SliceRow, gap_counts: &mut BTreeMap<String, (i64, i64)>) {
+    let gap_entry = gap_counts.entry(row.symbol_canonical.clone()).or_default();
+    gap_entry.0 += row.quality_gap;
+    gap_entry.1 += 1;
 }
 
 fn symbol_stats_from_bootstrap(
@@ -756,17 +879,7 @@ fn symbol_stats_from_bootstrap(
         for symbol in &rollup.symbols {
             let entry = stats
                 .entry(symbol.symbol_canonical.clone())
-                .or_insert_with(|| SymbolStats {
-                    symbol_canonical: symbol.symbol_canonical.clone(),
-                    execution_symbol_native: symbol.execution_symbol_native.clone(),
-                    reference_symbol_native: symbol.reference_symbol_native.clone(),
-                    observed_traded_notional: 0.0,
-                    bootstrap_days_available: 0,
-                    median_spread_bps: None,
-                    median_traded_notional: None,
-                    gap_rate: None,
-                    mapping_confidence: symbol.mapping_confidence.clone(),
-                });
+                .or_insert_with(|| SymbolStats::from_bootstrap(symbol));
             if entry.execution_symbol_native.is_none() {
                 entry.execution_symbol_native = symbol.execution_symbol_native.clone();
             }

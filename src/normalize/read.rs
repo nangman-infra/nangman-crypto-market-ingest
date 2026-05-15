@@ -357,24 +357,71 @@ fn append_batches_to_accumulator(
 ) -> Result<(), StorageError> {
     let file = File::open(path)?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
+    let Some(family) = InputObjectFamily::from_key(key) else {
+        return Ok(());
+    };
     for batch in reader {
         let batch = batch?;
+        append_batch_to_accumulator(family, &batch, args, accumulator)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InputObjectFamily {
+    RawMarketEvent,
+    SymbolHealth,
+    SourceHealth,
+    GapAlert,
+}
+
+impl InputObjectFamily {
+    fn from_key(key: &str) -> Option<Self> {
         if key.starts_with("raw_market_event/") {
-            for row in 0..batch.num_rows() {
-                accumulator.ingest_raw_event(args, raw_event_from_batch(&batch, row)?);
-            }
+            Some(Self::RawMarketEvent)
         } else if key.starts_with("symbol_health/") {
-            for row in 0..batch.num_rows() {
-                accumulator.ingest_symbol_health(symbol_health_from_batch(&batch, row)?);
-            }
+            Some(Self::SymbolHealth)
         } else if key.starts_with("source_health/") {
-            for row in 0..batch.num_rows() {
-                accumulator.ingest_source_health(source_health_from_batch(&batch, row)?);
-            }
+            Some(Self::SourceHealth)
         } else if key.starts_with("gap_alert/") {
-            for row in 0..batch.num_rows() {
-                accumulator.ingest_gap_alert(gap_alert_from_batch(&batch, row)?);
-            }
+            Some(Self::GapAlert)
+        } else {
+            None
+        }
+    }
+}
+
+fn append_batch_to_accumulator(
+    family: InputObjectFamily,
+    batch: &RecordBatch,
+    args: &NormalizeArgs,
+    accumulator: &mut BuildAccumulator,
+) -> Result<(), StorageError> {
+    for row in 0..batch.num_rows() {
+        append_accumulator_row(family, batch, row, args, accumulator)?;
+    }
+    Ok(())
+}
+
+fn append_accumulator_row(
+    family: InputObjectFamily,
+    batch: &RecordBatch,
+    row: usize,
+    args: &NormalizeArgs,
+    accumulator: &mut BuildAccumulator,
+) -> Result<(), StorageError> {
+    match family {
+        InputObjectFamily::RawMarketEvent => {
+            accumulator.ingest_raw_event(args, raw_event_from_batch(batch, row)?);
+        }
+        InputObjectFamily::SymbolHealth => {
+            accumulator.ingest_symbol_health(symbol_health_from_batch(batch, row)?);
+        }
+        InputObjectFamily::SourceHealth => {
+            accumulator.ingest_source_health(source_health_from_batch(batch, row)?);
+        }
+        InputObjectFamily::GapAlert => {
+            accumulator.ingest_gap_alert(gap_alert_from_batch(batch, row)?);
         }
     }
     Ok(())
