@@ -1,0 +1,18 @@
+maker_fee_bps = 2
+taker_fee_bps = 5
+minimum_required_edge_bps = 8
+safety_margin_bps = 3
+max_spread_bps = 12
+max_latency_ms = 1000
+default_slippage_bps = 3
+default_adverse_selection_bps = 4
+# Optional adverse microstructure gates are intentionally unset in baseline.
+# reject_entry_price_impact_lte_bps = -25
+# reject_entry_price_impact_10_tick_lte_bps = -25
+# reject_entry_orderbook_imbalance_lte_bps = -501
+# reject_entry_depth_imbalance_lte_bps = -501
+# reject_entry_microprice_edge_lte_micro_bps = -100000
+# reject_entry_symbol_relative_momentum_lte_bps = 0
+# reject_entry_trade_intensity_60s_lt = 30
+# reject_entry_trade_intensity_expansion_lte_ppm = 1200000
+# reject_entry_volatility_expansion_lte_bps = 0

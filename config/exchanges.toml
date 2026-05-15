@@ -1,0 +1,17 @@
+[[exchanges]]
+id = "binance"
+enabled = true
+rest_base_url = "https://api.binance.com"
+websocket_url = "wss://stream.binance.com:9443/ws"
+connect_timeout_ms = 5000
+read_timeout_ms = 5000
+max_reconnect_backoff_ms = 30000
+
+[[exchanges]]
+id = "upbit"
+enabled = true
+rest_base_url = "https://api.upbit.com"
+websocket_url = "wss://api.upbit.com/websocket/v1"
+connect_timeout_ms = 5000
+read_timeout_ms = 5000
+max_reconnect_backoff_ms = 30000

@@ -1,0 +1,409 @@
+quote_currency = "USDT"
+enabled = true
+
+# Binance public spot major-50 receive universe.
+# Generated at 2026-05-05T21:34:16+09:00 from /api/v3/exchangeInfo?permissions=SPOT&symbolStatus=TRADING
+# and /api/v3/ticker/24hr?type=FULL&symbolStatus=TRADING.
+# Selection: quoteAsset=USDT, status=TRADING, isSpotTradingAllowed=true,
+# then sorted by 24h quoteVolume desc and truncated to 50 symbols.
+# This is the Binance L0 receive universe, not final execution approval.
+
+[[symbols]]
+exchange = "binance"
+base = "USDC"
+quote = "USDT"
+raw = "USDCUSDT"
+normalized = "USDC-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "BTC"
+quote = "USDT"
+raw = "BTCUSDT"
+normalized = "BTC-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "ETH"
+quote = "USDT"
+raw = "ETHUSDT"
+normalized = "ETH-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "SOL"
+quote = "USDT"
+raw = "SOLUSDT"
+normalized = "SOL-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "TON"
+quote = "USDT"
+raw = "TONUSDT"
+normalized = "TON-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "ZEC"
+quote = "USDT"
+raw = "ZECUSDT"
+normalized = "ZEC-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "BNB"
+quote = "USDT"
+raw = "BNBUSDT"
+normalized = "BNB-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "XRP"
+quote = "USDT"
+raw = "XRPUSDT"
+normalized = "XRP-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "DOGE"
+quote = "USDT"
+raw = "DOGEUSDT"
+normalized = "DOGE-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "TST"
+quote = "USDT"
+raw = "TSTUSDT"
+normalized = "TST-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "USD1"
+quote = "USDT"
+raw = "USD1USDT"
+normalized = "USD1-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "DOGS"
+quote = "USDT"
+raw = "DOGSUSDT"
+normalized = "DOGS-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "CHIP"
+quote = "USDT"
+raw = "CHIPUSDT"
+normalized = "CHIP-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "DASH"
+quote = "USDT"
+raw = "DASHUSDT"
+normalized = "DASH-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "LUNC"
+quote = "USDT"
+raw = "LUNCUSDT"
+normalized = "LUNC-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "PEPE"
+quote = "USDT"
+raw = "PEPEUSDT"
+normalized = "PEPE-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "LINK"
+quote = "USDT"
+raw = "LINKUSDT"
+normalized = "LINK-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "PENGU"
+quote = "USDT"
+raw = "PENGUUSDT"
+normalized = "PENGU-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "TRX"
+quote = "USDT"
+raw = "TRXUSDT"
+normalized = "TRX-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "FDUSD"
+quote = "USDT"
+raw = "FDUSDUSDT"
+normalized = "FDUSD-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "ADA"
+quote = "USDT"
+raw = "ADAUSDT"
+normalized = "ADA-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "ENA"
+quote = "USDT"
+raw = "ENAUSDT"
+normalized = "ENA-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "GIGGLE"
+quote = "USDT"
+raw = "GIGGLEUSDT"
+normalized = "GIGGLE-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "TAO"
+quote = "USDT"
+raw = "TAOUSDT"
+normalized = "TAO-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "ONDO"
+quote = "USDT"
+raw = "ONDOUSDT"
+normalized = "ONDO-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "PAXG"
+quote = "USDT"
+raw = "PAXGUSDT"
+normalized = "PAXG-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "PENDLE"
+quote = "USDT"
+raw = "PENDLEUSDT"
+normalized = "PENDLE-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "SUI"
+quote = "USDT"
+raw = "SUIUSDT"
+normalized = "SUI-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "LTC"
+quote = "USDT"
+raw = "LTCUSDT"
+normalized = "LTC-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "XAUT"
+quote = "USDT"
+raw = "XAUTUSDT"
+normalized = "XAUT-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "WLFI"
+quote = "USDT"
+raw = "WLFIUSDT"
+normalized = "WLFI-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "EUR"
+quote = "USDT"
+raw = "EURUSDT"
+normalized = "EUR-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "AVAX"
+quote = "USDT"
+raw = "AVAXUSDT"
+normalized = "AVAX-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "BIO"
+quote = "USDT"
+raw = "BIOUSDT"
+normalized = "BIO-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "NEAR"
+quote = "USDT"
+raw = "NEARUSDT"
+normalized = "NEAR-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "TRUMP"
+quote = "USDT"
+raw = "TRUMPUSDT"
+normalized = "TRUMP-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "BCH"
+quote = "USDT"
+raw = "BCHUSDT"
+normalized = "BCH-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "RLUSD"
+quote = "USDT"
+raw = "RLUSDUSDT"
+normalized = "RLUSD-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "HIVE"
+quote = "USDT"
+raw = "HIVEUSDT"
+normalized = "HIVE-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "MEGA"
+quote = "USDT"
+raw = "MEGAUSDT"
+normalized = "MEGA-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "NOT"
+quote = "USDT"
+raw = "NOTUSDT"
+normalized = "NOT-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "NEIRO"
+quote = "USDT"
+raw = "NEIROUSDT"
+normalized = "NEIRO-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "ZBT"
+quote = "USDT"
+raw = "ZBTUSDT"
+normalized = "ZBT-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "UNI"
+quote = "USDT"
+raw = "UNIUSDT"
+normalized = "UNI-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "ZAMA"
+quote = "USDT"
+raw = "ZAMAUSDT"
+normalized = "ZAMA-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "XUSD"
+quote = "USDT"
+raw = "XUSDUSDT"
+normalized = "XUSD-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "HMSTR"
+quote = "USDT"
+raw = "HMSTRUSDT"
+normalized = "HMSTR-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "AAVE"
+quote = "USDT"
+raw = "AAVEUSDT"
+normalized = "AAVE-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "ORDI"
+quote = "USDT"
+raw = "ORDIUSDT"
+normalized = "ORDI-USDT"
+enabled = true
+
+[[symbols]]
+exchange = "binance"
+base = "U"
+quote = "USDT"
+raw = "UUSDT"
+normalized = "U-USDT"
+enabled = true

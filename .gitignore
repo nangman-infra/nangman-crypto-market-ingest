@@ -1,0 +1,8 @@
+target/
+.env
+.DS_Store
+*.pem
+*.key
+infra/roles-anywhere/
+infra/aws/config.container
+scripts/setup-host.sh
