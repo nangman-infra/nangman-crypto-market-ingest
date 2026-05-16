@@ -3,7 +3,10 @@ mod binance;
 mod upbit;
 
 use crate::log_stream;
-use crate::storage::{L0StorageConfig, L0StorageSink, StorageReport};
+use crate::storage::{
+    L0StorageConfig, L0StorageSink, S3RetentionConfig, StorageReport,
+    default_l0_retention_prefixes, run_s3_retention_once,
+};
 use serde::Serialize;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -136,7 +139,45 @@ pub async fn run_backfill(args: BackfillArgs) -> Result<(), BackfillError> {
         }),
     )
     .map_err(BackfillError::Json)?;
+    log_l0_retention_cleanup(&args).await?;
     Ok(())
+}
+
+async fn log_l0_retention_cleanup(args: &BackfillArgs) -> Result<(), BackfillError> {
+    let config = S3RetentionConfig {
+        bucket: args.l0_s3_bucket.clone(),
+        region: args.aws_region.clone(),
+        profile: args.aws_profile.clone(),
+        prefixes: default_l0_retention_prefixes(),
+        protected_prefixes: Vec::new(),
+        retention_secs: args.s3_retention_days.saturating_mul(86_400),
+        max_deletes_per_run: args.s3_retention_max_deletes_per_run,
+    };
+    match run_s3_retention_once(&config, unix_timestamp_ms()).await {
+        Ok(stats) => log_stream::info(
+            "market_backfill_s3_retention_run",
+            serde_json::json!({
+                "bucket": &config.bucket,
+                "retention_secs": config.retention_secs,
+                "max_deletes_per_run": config.max_deletes_per_run,
+                "scanned_object_count": stats.scanned_object_count,
+                "expired_object_count": stats.expired_object_count,
+                "deleted_object_count": stats.deleted_object_count,
+                "failed_delete_count": stats.failed_delete_count,
+                "deleted_bytes": stats.deleted_bytes,
+                "stopped_at_delete_limit": stats.stopped_at_delete_limit
+            }),
+        )
+        .map_err(BackfillError::Json),
+        Err(error) => log_stream::warn(
+            "market_backfill_s3_retention_error",
+            serde_json::json!({
+                "bucket": &config.bucket,
+                "error": error.to_string()
+            }),
+        )
+        .map_err(BackfillError::Json),
+    }
 }
 
 fn storage_config(args: &BackfillArgs) -> L0StorageConfig {

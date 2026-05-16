@@ -5,6 +5,8 @@ const DEFAULT_CONFIG_DIR: &str = "/opt/nangman-crypto/strategies/crypto/rust-eng
 const DEFAULT_L0_SPOOL_ROOT: &str = "/opt/nangman-crypto/data/spool/market-ingest/l0";
 const DEFAULT_AWS_REGION: &str = "ap-northeast-2";
 const DEFAULT_UPBIT_QUOTE_CURRENCY: &str = "KRW";
+const DEFAULT_S3_RETENTION_DAYS: i64 = 240;
+const DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN: usize = 1_000;
 
 #[derive(Debug, Clone)]
 pub struct BackfillArgs {
@@ -22,6 +24,8 @@ pub struct BackfillArgs {
     pub l0_spool_root: PathBuf,
     pub l0_flush_records: usize,
     pub l0_shard_count: u16,
+    pub s3_retention_days: i64,
+    pub s3_retention_max_deletes_per_run: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +61,8 @@ pub fn parse_args(
         l0_spool_root: PathBuf::from(DEFAULT_L0_SPOOL_ROOT),
         l0_flush_records: 1_000,
         l0_shard_count: 1,
+        s3_retention_days: DEFAULT_S3_RETENTION_DAYS,
+        s3_retention_max_deletes_per_run: DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN,
     };
 
     while let Some(arg) = args.next() {
@@ -164,6 +170,27 @@ pub fn parse_args(
                         )
                     })?,
                     "--l0-shard-count",
+                )?;
+            }
+            "--s3-retention-days" => {
+                parsed.s3_retention_days = parse_positive_i64(
+                    args.next().ok_or_else(|| {
+                        BackfillError::InvalidArgs(
+                            "--s3-retention-days requires a positive integer".to_owned(),
+                        )
+                    })?,
+                    "--s3-retention-days",
+                )?;
+            }
+            "--s3-retention-max-deletes-per-run" => {
+                parsed.s3_retention_max_deletes_per_run = parse_positive_usize(
+                    args.next().ok_or_else(|| {
+                        BackfillError::InvalidArgs(
+                            "--s3-retention-max-deletes-per-run requires a positive integer"
+                                .to_owned(),
+                        )
+                    })?,
+                    "--s3-retention-max-deletes-per-run",
                 )?;
             }
             _ => {
@@ -288,6 +315,7 @@ pub fn print_help() {
              --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214\n\
          \n\
          This worker writes historical raw trade events into MARKET_L0_BUCKET only.\n\
+         It also runs one app-owned S3 retention cleanup pass after the backfill manifest upload.\n\
          Binance uses public aggTrades for long-range trade backfill.\n\
          Upbit uses public recent trade history and rejects ranges older than the recent window."
     );
@@ -320,6 +348,20 @@ mod tests {
             parsed.symbols,
             Some(vec!["BTCUSDT".to_owned(), "ETHUSDT".to_owned()])
         );
+        assert_eq!(parsed.s3_retention_days, 240);
+        assert_eq!(parsed.s3_retention_max_deletes_per_run, 1_000);
+    }
+
+    #[test]
+    fn parses_s3_retention_knobs() {
+        let mut raw = base_args();
+        raw.push("--s3-retention-days".to_owned());
+        raw.push("365".to_owned());
+        raw.push("--s3-retention-max-deletes-per-run".to_owned());
+        raw.push("50".to_owned());
+        let parsed = parse_args(raw.into_iter()).unwrap().unwrap();
+        assert_eq!(parsed.s3_retention_days, 365);
+        assert_eq!(parsed.s3_retention_max_deletes_per_run, 50);
     }
 
     #[test]

@@ -9,6 +9,9 @@ const DEFAULT_HIGH_WATER_PCT: u8 = 70;
 const DEFAULT_EMERGENCY_PCT: u8 = 90;
 const DEFAULT_SAFETY_FLOOR_HOURS: i64 = 2;
 const DEFAULT_EVICTION_CHECK_INTERVAL_SECS: u64 = 600;
+const DEFAULT_S3_RETENTION_DAYS: i64 = 240;
+const DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS: u64 = 21_600;
+const DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN: usize = 1_000;
 
 #[derive(Debug)]
 pub struct Args {
@@ -34,6 +37,9 @@ pub struct Args {
     pub local_disk_emergency_pct: u8,
     pub safety_floor_hours: i64,
     pub eviction_check_interval_secs: u64,
+    pub s3_retention_days: i64,
+    pub s3_retention_check_interval_secs: u64,
+    pub s3_retention_max_deletes_per_run: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +72,9 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>
         local_disk_emergency_pct: DEFAULT_EMERGENCY_PCT,
         safety_floor_hours: DEFAULT_SAFETY_FLOOR_HOURS,
         eviction_check_interval_secs: DEFAULT_EVICTION_CHECK_INTERVAL_SECS,
+        s3_retention_days: DEFAULT_S3_RETENTION_DAYS,
+        s3_retention_check_interval_secs: DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS,
+        s3_retention_max_deletes_per_run: DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN,
     };
 
     while let Some(arg) = args.next() {
@@ -190,6 +199,27 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>
                     "--eviction-check-interval-secs",
                 )?;
             }
+            "--s3-retention-days" => {
+                parsed.s3_retention_days = parse_positive_i64(
+                    args.next()
+                        .ok_or("--s3-retention-days requires a positive integer")?,
+                    "--s3-retention-days",
+                )?;
+            }
+            "--s3-retention-check-interval-secs" => {
+                parsed.s3_retention_check_interval_secs = parse_positive_u64(
+                    args.next()
+                        .ok_or("--s3-retention-check-interval-secs requires a positive integer")?,
+                    "--s3-retention-check-interval-secs",
+                )?;
+            }
+            "--s3-retention-max-deletes-per-run" => {
+                parsed.s3_retention_max_deletes_per_run = parse_positive_usize(
+                    args.next()
+                        .ok_or("--s3-retention-max-deletes-per-run requires a positive integer")?,
+                    "--s3-retention-max-deletes-per-run",
+                )?;
+            }
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
     }
@@ -305,7 +335,9 @@ pub fn print_help() {
              --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214\n\
          \n\
          This reads Binance or Upbit public WebSocket streams only. It does not use private APIs,\n\
-         credentials, AI hot-path decisions, order placement, or live trading."
+         credentials, AI hot-path decisions, order placement, or live trading.\n\
+         S3 retention cleanup is app-owned when --l0-s3-bucket is set. Bucket lifecycle remains\n\
+         a fallback safety net."
     );
 }
 
@@ -324,6 +356,9 @@ mod tests {
         assert_eq!(parsed.local_disk_emergency_pct, 90);
         assert_eq!(parsed.safety_floor_hours, 2);
         assert_eq!(parsed.eviction_check_interval_secs, 600);
+        assert_eq!(parsed.s3_retention_days, 240);
+        assert_eq!(parsed.s3_retention_check_interval_secs, 21_600);
+        assert_eq!(parsed.s3_retention_max_deletes_per_run, 1_000);
         assert_eq!(
             parsed.binance_futures_rest_base_url,
             "https://fapi.binance.com"
@@ -361,10 +396,19 @@ mod tests {
         raw.push("4".to_owned());
         raw.push("--eviction-check-interval-secs".to_owned());
         raw.push("300".to_owned());
+        raw.push("--s3-retention-days".to_owned());
+        raw.push("365".to_owned());
+        raw.push("--s3-retention-check-interval-secs".to_owned());
+        raw.push("3600".to_owned());
+        raw.push("--s3-retention-max-deletes-per-run".to_owned());
+        raw.push("50".to_owned());
         let parsed = parse_args(raw.into_iter()).unwrap().unwrap();
         assert_eq!(parsed.local_disk_high_water_pct, 60);
         assert_eq!(parsed.local_disk_emergency_pct, 85);
         assert_eq!(parsed.safety_floor_hours, 4);
         assert_eq!(parsed.eviction_check_interval_secs, 300);
+        assert_eq!(parsed.s3_retention_days, 365);
+        assert_eq!(parsed.s3_retention_check_interval_secs, 3600);
+        assert_eq!(parsed.s3_retention_max_deletes_per_run, 50);
     }
 }

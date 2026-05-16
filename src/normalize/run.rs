@@ -7,6 +7,10 @@ use super::write::index_pointer_key;
 use crate::log_stream;
 use crate::shutdown::ShutdownListener;
 use crate::storage::s3_upload::S3Uploader;
+use crate::storage::{
+    S3RetentionConfig, default_l0_retention_prefixes, default_l1_retention_prefixes,
+    run_s3_retention_once,
+};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -248,6 +252,7 @@ async fn run_normalize_worker(
     initial_now_ms: i64,
 ) -> Result<(), Box<dyn Error>> {
     let mut shutdown = ShutdownHandle::install()?;
+    let mut retention_handles = Some(spawn_s3_retention_loops(&args));
     let sleep_duration = Duration::from_millis(u64::try_from(args.schedule_interval_ms)?);
     let mut now_ms = initial_now_ms;
     log_stream::info(
@@ -265,6 +270,7 @@ async fn run_normalize_worker(
                 "market_normalize_worker_stopped",
                 json!({ "reason": "signal" }),
             )?;
+            abort_retention_handles(retention_handles.take().unwrap_or_default()).await;
             return Ok(());
         }
         log_stream::debug(
@@ -276,9 +282,93 @@ async fn run_normalize_worker(
                 "market_normalize_worker_stopped",
                 json!({ "reason": "signal" }),
             )?;
+            abort_retention_handles(retention_handles.take().unwrap_or_default()).await;
             return Ok(());
         }
         now_ms = unix_timestamp_millis();
+    }
+}
+
+fn spawn_s3_retention_loops(args: &NormalizeArgs) -> Vec<JoinHandle<()>> {
+    let interval_secs = args.s3_retention_check_interval_secs;
+    [
+        (
+            "l0",
+            S3RetentionConfig {
+                bucket: args.l0_s3_bucket.clone(),
+                region: args.aws_region.clone(),
+                profile: args.aws_profile.clone(),
+                prefixes: default_l0_retention_prefixes(),
+                protected_prefixes: Vec::new(),
+                retention_secs: args.s3_retention_days.saturating_mul(86_400),
+                max_deletes_per_run: args.s3_retention_max_deletes_per_run,
+            },
+        ),
+        (
+            "l1",
+            S3RetentionConfig {
+                bucket: args.l1_s3_bucket.clone(),
+                region: args.aws_region.clone(),
+                profile: args.aws_profile.clone(),
+                prefixes: default_l1_retention_prefixes(),
+                protected_prefixes: Vec::new(),
+                retention_secs: args.s3_retention_days.saturating_mul(86_400),
+                max_deletes_per_run: args.s3_retention_max_deletes_per_run,
+            },
+        ),
+    ]
+    .into_iter()
+    .map(|(layer, config)| {
+        tokio::spawn(async move {
+            run_s3_retention_loop(layer, config, interval_secs).await;
+        })
+    })
+    .collect()
+}
+
+async fn abort_retention_handles(handles: Vec<JoinHandle<()>>) {
+    for handle in handles {
+        handle.abort();
+        let _ = handle.await;
+    }
+}
+
+async fn run_s3_retention_loop(layer: &'static str, config: S3RetentionConfig, interval_secs: u64) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let now_ms = unix_timestamp_millis();
+        match run_s3_retention_once(&config, now_ms).await {
+            Ok(stats) => {
+                let _ = log_stream::info(
+                    "market_normalize_s3_retention_run",
+                    json!({
+                        "layer": layer,
+                        "bucket": &config.bucket,
+                        "retention_secs": config.retention_secs,
+                        "max_deletes_per_run": config.max_deletes_per_run,
+                        "scanned_object_count": stats.scanned_object_count,
+                        "expired_object_count": stats.expired_object_count,
+                        "deleted_object_count": stats.deleted_object_count,
+                        "failed_delete_count": stats.failed_delete_count,
+                        "deleted_bytes": stats.deleted_bytes,
+                        "max_deleted_age_secs": stats.max_deleted_age_secs,
+                        "stopped_at_delete_limit": stats.stopped_at_delete_limit
+                    }),
+                );
+            }
+            Err(error) => {
+                let _ = log_stream::warn(
+                    "market_normalize_s3_retention_error",
+                    json!({
+                        "layer": layer,
+                        "bucket": &config.bucket,
+                        "error": error.to_string()
+                    }),
+                );
+            }
+        }
     }
 }
 

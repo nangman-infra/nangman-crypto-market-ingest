@@ -6,6 +6,7 @@ pub mod orphan;
 mod parquet_file;
 mod partition;
 pub mod record;
+pub mod retention;
 pub mod s3_upload;
 mod sink;
 pub mod symbol_health;
@@ -15,6 +16,10 @@ use std::fmt;
 pub use disk::disk_used_pct;
 pub use eviction::{EvictionConfig, EvictionStats, evict_once, sealed_marker_path};
 pub use orphan::{UnsealedOrphanConfig, UnsealedOrphanStats, cleanup_invalid_unsealed_once};
+pub use retention::{
+    S3RetentionConfig, S3RetentionStats, default_l0_retention_prefixes,
+    default_l1_retention_prefixes, run_s3_retention_once,
+};
 pub use sink::{L0StorageConfig, L0StorageSink, StorageReport};
 
 #[derive(Debug)]

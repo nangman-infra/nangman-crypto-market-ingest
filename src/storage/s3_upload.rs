@@ -23,6 +23,13 @@ pub struct S3Uploader {
     bucket: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3ObjectSummary {
+    pub key: String,
+    pub last_modified_ms: Option<i64>,
+    pub size_bytes: u64,
+}
+
 impl S3Uploader {
     pub async fn new(
         bucket: String,
@@ -74,7 +81,15 @@ impl S3Uploader {
     }
 
     pub async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        let mut keys = Vec::new();
+        let summaries = self.list_object_summaries(prefix).await?;
+        Ok(summaries.into_iter().map(|summary| summary.key).collect())
+    }
+
+    pub async fn list_object_summaries(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<S3ObjectSummary>, StorageError> {
+        let mut objects = Vec::new();
         let mut continuation_token: Option<String> = None;
 
         loop {
@@ -97,7 +112,13 @@ impl S3Uploader {
 
             for object in output.contents() {
                 if let Some(key) = object.key() {
-                    keys.push(key.to_owned());
+                    objects.push(S3ObjectSummary {
+                        key: key.to_owned(),
+                        last_modified_ms: object
+                            .last_modified()
+                            .and_then(|last_modified| last_modified.to_millis().ok()),
+                        size_bytes: object.size().unwrap_or(0).try_into().unwrap_or(0),
+                    });
                 }
             }
 
@@ -110,8 +131,8 @@ impl S3Uploader {
             continuation_token = Some(next_token.to_owned());
         }
 
-        keys.sort();
-        Ok(keys)
+        objects.sort_by(|left, right| left.key.cmp(&right.key));
+        Ok(objects)
     }
 
     pub async fn list_keys_page(
