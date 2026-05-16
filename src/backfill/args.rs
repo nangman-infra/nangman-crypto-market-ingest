@@ -5,7 +5,7 @@ const DEFAULT_CONFIG_DIR: &str = "/opt/nangman-crypto/strategies/crypto/rust-eng
 const DEFAULT_L0_SPOOL_ROOT: &str = "/opt/nangman-crypto/data/spool/market-ingest/l0";
 const DEFAULT_AWS_REGION: &str = "ap-northeast-2";
 const DEFAULT_UPBIT_QUOTE_CURRENCY: &str = "KRW";
-const DEFAULT_S3_RETENTION_DAYS: i64 = 240;
+const DEFAULT_S3_RETENTION_DAYS: i64 = 45;
 const DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN: usize = 1_000;
 
 #[derive(Debug, Clone)]
@@ -316,6 +316,7 @@ pub fn print_help() {
          \n\
          This worker writes historical raw trade events into MARKET_L0_BUCKET only.\n\
          It also runs one app-owned S3 retention cleanup pass after the backfill manifest upload.\n\
+         L0 defaults to 45 days; bucket lifecycle remains a fallback safety net at 60 days.\n\
          Binance uses public aggTrades for long-range trade backfill.\n\
          Upbit uses public recent trade history and rejects ranges older than the recent window."
     );
@@ -348,7 +349,7 @@ mod tests {
             parsed.symbols,
             Some(vec!["BTCUSDT".to_owned(), "ETHUSDT".to_owned()])
         );
-        assert_eq!(parsed.s3_retention_days, 240);
+        assert_eq!(parsed.s3_retention_days, 45);
         assert_eq!(parsed.s3_retention_max_deletes_per_run, 1_000);
     }
 

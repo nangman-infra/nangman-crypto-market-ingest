@@ -173,7 +173,8 @@ mod tests {
             max_windows_per_tick: 192,
             live_priority: false,
             live_priority_lag_threshold_ms: 900_000,
-            s3_retention_days: 240,
+            l0_s3_retention_days: 45,
+            l1_s3_retention_days: 240,
             s3_retention_check_interval_secs: 21_600,
             s3_retention_max_deletes_per_run: 1_000,
         }

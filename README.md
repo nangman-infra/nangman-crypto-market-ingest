@@ -418,10 +418,15 @@ Container DoD:
 - S3 output goes to `nangman-crypto-dev-market-ingest-l0-962214` unless `MARKET_L0_BUCKET` is overridden.
 - L1 normalize output goes to `nangman-crypto-dev-market-ingest-l1-962214`
   unless `MARKET_L1_BUCKET` is overridden.
+- S3 retention is app-owned: L0 defaults to 45 days, L1 defaults to 240 days,
+  and the shared cleanup loop checks every 6 hours. Bucket lifecycle is only the
+  fallback safety net: L0 expires after 60 days, L1 expires after 300 days, and
+  `normalized_market_slice/` transitions to Standard-IA after 30 days.
 - L1 universe bootstrap writes and reads
   `symbol_universe_snapshot/bootstrap_rollup/*`; this existing universe prefix is
   required for 30-day point-in-time universe approval.
 - The runtime role can `ListBucket`, `GetObject`, and `PutObject` on the L0/L1
-  buckets, and can `DeleteObject` only for `_preflight/market-ingest-app/*`.
+  buckets, and can `DeleteObject` for `_preflight/market-ingest-app/*` plus the
+  app-owned market-ingest retention prefixes.
 - If L0/L1 buckets use SSE-KMS, the runtime role also needs the matching KMS
   `GenerateDataKey` and `Decrypt` permissions.

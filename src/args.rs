@@ -9,7 +9,7 @@ const DEFAULT_HIGH_WATER_PCT: u8 = 70;
 const DEFAULT_EMERGENCY_PCT: u8 = 90;
 const DEFAULT_SAFETY_FLOOR_HOURS: i64 = 2;
 const DEFAULT_EVICTION_CHECK_INTERVAL_SECS: u64 = 600;
-const DEFAULT_S3_RETENTION_DAYS: i64 = 240;
+const DEFAULT_S3_RETENTION_DAYS: i64 = 45;
 const DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS: u64 = 21_600;
 const DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN: usize = 1_000;
 
@@ -336,8 +336,8 @@ pub fn print_help() {
          \n\
          This reads Binance or Upbit public WebSocket streams only. It does not use private APIs,\n\
          credentials, AI hot-path decisions, order placement, or live trading.\n\
-         S3 retention cleanup is app-owned when --l0-s3-bucket is set. Bucket lifecycle remains\n\
-         a fallback safety net."
+         S3 retention cleanup is app-owned when --l0-s3-bucket is set. L0 defaults to 45 days;\n\
+         bucket lifecycle remains a fallback safety net at 60 days."
     );
 }
 
@@ -356,7 +356,7 @@ mod tests {
         assert_eq!(parsed.local_disk_emergency_pct, 90);
         assert_eq!(parsed.safety_floor_hours, 2);
         assert_eq!(parsed.eviction_check_interval_secs, 600);
-        assert_eq!(parsed.s3_retention_days, 240);
+        assert_eq!(parsed.s3_retention_days, 45);
         assert_eq!(parsed.s3_retention_check_interval_secs, 21_600);
         assert_eq!(parsed.s3_retention_max_deletes_per_run, 1_000);
         assert_eq!(

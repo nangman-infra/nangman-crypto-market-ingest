@@ -16,7 +16,8 @@ const DEFAULT_MAX_LATENCY_MS: i64 = 1_000;
 const DEFAULT_MAX_WINDOWS_PER_TICK: usize = 192;
 const DEFAULT_L0_RUN_KEY_OVERLAP_MS: i64 = 360_000;
 const DEFAULT_LIVE_PRIORITY_LAG_THRESHOLD_MS: i64 = 900_000;
-const DEFAULT_S3_RETENTION_DAYS: i64 = 240;
+const DEFAULT_L0_S3_RETENTION_DAYS: i64 = 45;
+const DEFAULT_L1_S3_RETENTION_DAYS: i64 = 240;
 const DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS: u64 = 21_600;
 const DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN: usize = 1_000;
 
@@ -45,7 +46,8 @@ pub struct NormalizeArgs {
     pub max_windows_per_tick: usize,
     pub live_priority: bool,
     pub live_priority_lag_threshold_ms: i64,
-    pub s3_retention_days: i64,
+    pub l0_s3_retention_days: i64,
+    pub l1_s3_retention_days: i64,
     pub s3_retention_check_interval_secs: u64,
     pub s3_retention_max_deletes_per_run: usize,
 }
@@ -83,7 +85,8 @@ pub fn parse_args(
         max_windows_per_tick: DEFAULT_MAX_WINDOWS_PER_TICK,
         live_priority: false,
         live_priority_lag_threshold_ms: DEFAULT_LIVE_PRIORITY_LAG_THRESHOLD_MS,
-        s3_retention_days: DEFAULT_S3_RETENTION_DAYS,
+        l0_s3_retention_days: DEFAULT_L0_S3_RETENTION_DAYS,
+        l1_s3_retention_days: DEFAULT_L1_S3_RETENTION_DAYS,
         s3_retention_check_interval_secs: DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS,
         s3_retention_max_deletes_per_run: DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN,
     };
@@ -183,7 +186,17 @@ pub fn parse_args(
                     parse_positive_i64(args.next(), "--live-priority-lag-threshold-ms")?;
             }
             "--s3-retention-days" => {
-                parsed.s3_retention_days = parse_positive_i64(args.next(), "--s3-retention-days")?;
+                let retention_days = parse_positive_i64(args.next(), "--s3-retention-days")?;
+                parsed.l0_s3_retention_days = retention_days;
+                parsed.l1_s3_retention_days = retention_days;
+            }
+            "--l0-s3-retention-days" => {
+                parsed.l0_s3_retention_days =
+                    parse_positive_i64(args.next(), "--l0-s3-retention-days")?;
+            }
+            "--l1-s3-retention-days" => {
+                parsed.l1_s3_retention_days =
+                    parse_positive_i64(args.next(), "--l1-s3-retention-days")?;
             }
             "--s3-retention-check-interval-secs" => {
                 parsed.s3_retention_check_interval_secs =
@@ -260,8 +273,8 @@ closed watermark window first when sequential catch-up lags by at least
 --live-priority-lag-threshold-ms, then continues the same tick with contiguous
 catch-up work. With an explicit range, BACKFILL mode is one-shot. --preflight
 and --audit-l1-index-* are also one-shot. S3 retention cleanup is app-owned
-for both L0 and L1 buckets in long-lived worker mode; bucket lifecycle remains
-only a fallback safety net."#
+for both L0 and L1 buckets in long-lived worker mode. L0 defaults to 45 days;
+L1 defaults to 240 days. Bucket lifecycle remains only a fallback safety net."#
     );
 }
 
@@ -324,7 +337,8 @@ mod tests {
         let parsed = parse_args(raw.into_iter()).unwrap().unwrap();
         assert_eq!(parsed.l0_s3_bucket, "l0");
         assert_eq!(parsed.l1_s3_bucket, "l1");
-        assert_eq!(parsed.s3_retention_days, 240);
+        assert_eq!(parsed.l0_s3_retention_days, 45);
+        assert_eq!(parsed.l1_s3_retention_days, 240);
         assert_eq!(parsed.s3_retention_check_interval_secs, 21_600);
         assert_eq!(parsed.s3_retention_max_deletes_per_run, 1_000);
     }
@@ -487,8 +501,26 @@ mod tests {
             "50".to_owned(),
         ];
         let parsed = parse_args(raw.into_iter()).unwrap().unwrap();
-        assert_eq!(parsed.s3_retention_days, 365);
+        assert_eq!(parsed.l0_s3_retention_days, 365);
+        assert_eq!(parsed.l1_s3_retention_days, 365);
         assert_eq!(parsed.s3_retention_check_interval_secs, 3600);
         assert_eq!(parsed.s3_retention_max_deletes_per_run, 50);
+    }
+
+    #[test]
+    fn parses_layered_s3_retention_days() {
+        let raw = vec![
+            "--l0-s3-bucket".to_owned(),
+            "l0".to_owned(),
+            "--l1-s3-bucket".to_owned(),
+            "l1".to_owned(),
+            "--l0-s3-retention-days".to_owned(),
+            "30".to_owned(),
+            "--l1-s3-retention-days".to_owned(),
+            "365".to_owned(),
+        ];
+        let parsed = parse_args(raw.into_iter()).unwrap().unwrap();
+        assert_eq!(parsed.l0_s3_retention_days, 30);
+        assert_eq!(parsed.l1_s3_retention_days, 365);
     }
 }
