@@ -48,6 +48,42 @@ struct RetentionDeletePlan {
     delete_candidates: Vec<RetentionDeleteCandidate>,
 }
 
+pub fn l0_s3_retention_config(
+    bucket: String,
+    region: String,
+    profile: Option<String>,
+    retention_days: i64,
+    max_deletes_per_run: usize,
+) -> S3RetentionConfig {
+    S3RetentionConfig {
+        bucket,
+        region,
+        profile,
+        prefixes: default_l0_retention_prefixes(),
+        protected_prefixes: Vec::new(),
+        retention_secs: retention_days.saturating_mul(86_400),
+        max_deletes_per_run,
+    }
+}
+
+pub fn l1_s3_retention_config(
+    bucket: String,
+    region: String,
+    profile: Option<String>,
+    retention_days: i64,
+    max_deletes_per_run: usize,
+) -> S3RetentionConfig {
+    S3RetentionConfig {
+        bucket,
+        region,
+        profile,
+        prefixes: default_l1_retention_prefixes(),
+        protected_prefixes: Vec::new(),
+        retention_secs: retention_days.saturating_mul(86_400),
+        max_deletes_per_run,
+    }
+}
+
 pub async fn run_s3_retention_once(
     config: &S3RetentionConfig,
     now_ms: i64,
@@ -282,6 +318,35 @@ mod tests {
         assert!(default_l0_retention_prefixes().contains(&"runs/".to_owned()));
         assert!(default_l1_retention_prefixes().contains(&"normalized_market_slice/".to_owned()));
         assert!(default_l1_retention_prefixes().contains(&"l1_index/".to_owned()));
+    }
+
+    #[test]
+    fn config_builders_apply_layer_prefixes_and_day_retention() {
+        let l0 = l0_s3_retention_config(
+            "l0-bucket".to_owned(),
+            "ap-northeast-2".to_owned(),
+            Some("dev".to_owned()),
+            240,
+            1_000,
+        );
+        assert_eq!(l0.bucket, "l0-bucket");
+        assert_eq!(l0.profile.as_deref(), Some("dev"));
+        assert_eq!(l0.retention_secs, 20_736_000);
+        assert_eq!(l0.max_deletes_per_run, 1_000);
+        assert!(l0.prefixes.contains(&"raw_market_event/".to_owned()));
+
+        let l1 = l1_s3_retention_config(
+            "l1-bucket".to_owned(),
+            "ap-northeast-2".to_owned(),
+            None,
+            240,
+            500,
+        );
+        assert_eq!(l1.bucket, "l1-bucket");
+        assert_eq!(l1.profile, None);
+        assert_eq!(l1.retention_secs, 20_736_000);
+        assert_eq!(l1.max_deletes_per_run, 500);
+        assert!(l1.prefixes.contains(&"normalized_market_slice/".to_owned()));
     }
 
     #[test]

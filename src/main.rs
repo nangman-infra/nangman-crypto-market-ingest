@@ -3,9 +3,9 @@ use market_ingest_app::args::{Args, Venue, parse_args, print_help};
 use market_ingest_app::config::load_market_ingest_config;
 use market_ingest_app::log_stream;
 use market_ingest_app::storage::{
-    EvictionConfig, L0StorageConfig, S3RetentionConfig, UnsealedOrphanConfig,
-    cleanup_invalid_unsealed_once, default_l0_retention_prefixes, disk_used_pct, evict_once,
-    run_s3_retention_once,
+    EvictionConfig, L0StorageConfig, S3RetentionLoopEvents, UnsealedOrphanConfig,
+    cleanup_invalid_unsealed_once, disk_used_pct, evict_once, l0_s3_retention_config,
+    spawn_s3_retention_loop,
 };
 use market_ingest_app::{binance, upbit};
 use serde_json::json;
@@ -61,19 +61,23 @@ fn spawn_eviction_loop(args: &Args) -> Option<JoinHandle<()>> {
 
 fn spawn_l0_s3_retention_loop(args: &Args) -> Option<JoinHandle<()>> {
     let bucket = args.l0_s3_bucket.clone()?;
-    let config = S3RetentionConfig {
+    let config = l0_s3_retention_config(
         bucket,
-        region: args.aws_region.clone(),
-        profile: args.aws_profile.clone(),
-        prefixes: default_l0_retention_prefixes(),
-        protected_prefixes: Vec::new(),
-        retention_secs: args.s3_retention_days.saturating_mul(86_400),
-        max_deletes_per_run: args.s3_retention_max_deletes_per_run,
-    };
+        args.aws_region.clone(),
+        args.aws_profile.clone(),
+        args.s3_retention_days,
+        args.s3_retention_max_deletes_per_run,
+    );
     let interval_secs = args.s3_retention_check_interval_secs;
-    Some(tokio::spawn(async move {
-        run_s3_retention_loop("l0", config, interval_secs).await;
-    }))
+    Some(spawn_s3_retention_loop(
+        "l0",
+        config,
+        interval_secs,
+        S3RetentionLoopEvents {
+            run_event: "market_ingest_s3_retention_run",
+            error_event: "market_ingest_s3_retention_error",
+        },
+    ))
 }
 
 fn log_unsealed_orphan_cleanup(args: &Args) {
@@ -149,45 +153,6 @@ async fn run_eviction_loop(config: EvictionConfig, interval_secs: u64) {
             }
             Err(error) => {
                 log_stream::error("market_ingest_eviction_error", &error.to_string());
-            }
-        }
-    }
-}
-
-async fn run_s3_retention_loop(layer: &'static str, config: S3RetentionConfig, interval_secs: u64) {
-    let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        ticker.tick().await;
-        let now_ms = unix_timestamp_millis();
-        match run_s3_retention_once(&config, now_ms).await {
-            Ok(stats) => {
-                let _ = log_stream::info(
-                    "market_ingest_s3_retention_run",
-                    json!({
-                        "layer": layer,
-                        "bucket": &config.bucket,
-                        "retention_secs": config.retention_secs,
-                        "max_deletes_per_run": config.max_deletes_per_run,
-                        "scanned_object_count": stats.scanned_object_count,
-                        "expired_object_count": stats.expired_object_count,
-                        "deleted_object_count": stats.deleted_object_count,
-                        "failed_delete_count": stats.failed_delete_count,
-                        "deleted_bytes": stats.deleted_bytes,
-                        "max_deleted_age_secs": stats.max_deleted_age_secs,
-                        "stopped_at_delete_limit": stats.stopped_at_delete_limit
-                    }),
-                );
-            }
-            Err(error) => {
-                let _ = log_stream::warn(
-                    "market_ingest_s3_retention_error",
-                    json!({
-                        "layer": layer,
-                        "bucket": &config.bucket,
-                        "error": error.to_string()
-                    }),
-                );
             }
         }
     }

@@ -7,6 +7,7 @@ mod parquet_file;
 mod partition;
 pub mod record;
 pub mod retention;
+pub mod retention_loop;
 pub mod s3_upload;
 mod sink;
 pub mod symbol_health;
@@ -18,7 +19,11 @@ pub use eviction::{EvictionConfig, EvictionStats, evict_once, sealed_marker_path
 pub use orphan::{UnsealedOrphanConfig, UnsealedOrphanStats, cleanup_invalid_unsealed_once};
 pub use retention::{
     S3RetentionConfig, S3RetentionStats, default_l0_retention_prefixes,
-    default_l1_retention_prefixes, run_s3_retention_once,
+    default_l1_retention_prefixes, l0_s3_retention_config, l1_s3_retention_config,
+    run_s3_retention_once,
+};
+pub use retention_loop::{
+    S3RetentionLoopEvents, abort_s3_retention_handles, spawn_s3_retention_loop,
 };
 pub use sink::{L0StorageConfig, L0StorageSink, StorageReport};
 
