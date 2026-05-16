@@ -13,35 +13,37 @@ COPY . /opt/nangman-crypto
 RUN cargo build --release \
     --manifest-path /opt/nangman-crypto/Cargo.toml
 
-FROM public.ecr.aws/docker/library/debian:bookworm-slim AS runtime
+FROM public.ecr.aws/docker/library/debian:bookworm-slim AS runtime-layout
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --shell /usr/sbin/nologin market-ingest \
-    && mkdir -p /opt/nangman-crypto/data/spool/market-ingest/l0 \
+RUN mkdir -p /opt/nangman-crypto/data/spool/market-ingest/l0 \
     && mkdir -p /opt/nangman-crypto/data/spool/market-ingest/l1 \
-    && mkdir -p /opt/nangman-crypto/strategies/crypto/rust-engine/config \
-    && chown -R market-ingest:market-ingest /opt/nangman-crypto
+    && mkdir -p /opt/nangman-crypto/data/spool/market-normalize/catchup \
+    && chown -R 65532:65532 /opt/nangman-crypto
 
-COPY --from=builder \
+FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+
+COPY --from=builder --chown=nonroot:nonroot \
     /opt/nangman-crypto/target/release/market-ingest-app \
     /usr/local/bin/market-ingest-app
-COPY --from=builder \
+COPY --from=builder --chown=nonroot:nonroot \
     /opt/nangman-crypto/target/release/market-normalize \
     /usr/local/bin/market-normalize
-COPY --from=builder \
+COPY --from=builder --chown=nonroot:nonroot \
     /opt/nangman-crypto/target/release/market-backfill \
     /usr/local/bin/market-backfill
-COPY --from=builder \
+COPY --from=builder --chown=nonroot:nonroot \
     /opt/nangman-crypto/target/release/crypto-market-ingest-supervisor \
     /usr/local/bin/crypto-market-ingest-supervisor
-COPY --from=builder \
+COPY --from=builder --chown=nonroot:nonroot \
     /opt/nangman-crypto/config \
     /opt/nangman-crypto/strategies/crypto/rust-engine/config
+COPY --from=runtime-layout --chown=nonroot:nonroot \
+    /opt/nangman-crypto/data \
+    /opt/nangman-crypto/data
 
-USER market-ingest
+USER nonroot:nonroot
 
-ENV AWS_SDK_LOAD_CONFIG=1
+ENV AWS_SDK_LOAD_CONFIG=1 \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 ENTRYPOINT ["/usr/local/bin/crypto-market-ingest-supervisor"]
