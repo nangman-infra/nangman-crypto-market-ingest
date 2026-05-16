@@ -1,6 +1,26 @@
 # market-ingest-app
 
-Public market data receive smoke for the on-prem runtime spine.
+All-in-one public market data ingest package for the AI-DLC Alpha Discovery
+runtime.
+
+The production container entrypoint is `crypto-market-ingest-supervisor`. One
+ECS service runs one task and the supervisor starts three internal workers:
+
+- `market-ingest-app`: realtime WebSocket L0 writer.
+- `market-backfill`: Binance historical L0 bootstrap scheduler.
+- `market-normalize`: L0-to-L1 normalization loop.
+
+Default production behavior is automatic. On task start, realtime Binance L0
+ingest begins immediately, L1 normalization begins immediately, and Binance
+historical bootstrap fills the missing 210-day L0 range in bounded chunks. The
+bootstrap scheduler records success markers under the L1 bucket:
+
+```text
+supervisor/bootstrap/venue=binance/start_ms={start_ms}/end_ms={end_ms}/success.json
+```
+
+The marker is the idempotency contract. If the task restarts, already completed
+chunks are skipped and the next missing chunk resumes.
 
 This app only reads public market streams:
 
@@ -31,6 +51,23 @@ flag in this public symbol response; warning/monitoring-tag symbols must be
 manually disabled in the universe file when needed.
 
 It does not use private APIs, credentials, AI hot-path decisions, order placement, or live trading.
+
+## Runtime triggers
+
+- Task start: supervisor starts realtime L0, L1 normalize, and the bootstrap
+  scheduler.
+- Realtime worker exit: supervisor exits non-zero so ECS restarts the task.
+- Normalize worker exit: supervisor restarts only the normalize worker after a
+  bounded delay.
+- Bootstrap chunk success: supervisor writes the L1 marker and moves to the next
+  missing chunk after `--bootstrap-interval-secs`.
+- Bootstrap chunk failure: supervisor leaves the marker absent, waits, and
+  retries the same chunk later.
+- SIGTERM: supervisor stops children and exits cleanly.
+
+The default L0 app-owned retention is 45 days. The default L1 app-owned
+retention is 240 days. S3 lifecycle remains a secondary cleanup guard, not the
+primary data-management owner.
 
 ## Binance
 
@@ -127,7 +164,9 @@ report, and the next recovery/backfill pass can retry from local data.
 
 ## L1 normalization
 
-`market-normalize` is a separate long-lived worker binary in this app image. It
+`market-normalize` is a long-lived worker binary in this app image. In
+production it is started by `crypto-market-ingest-supervisor`; it can still be
+run directly for manual audit and repair. It
 reads L0 objects by operating mode, builds 1-second
 `normalized_market_slice_v1` rows by `exchange_timestamp_ms`, and publishes Parquet data,
 `normalization_report_v1`, `l1_manifest_v1`, and the success-only `l1_index`
@@ -175,7 +214,7 @@ cargo run \
   --audit-l1-index-end-ms 1778043300000
 ```
 
-Default mode is a compose-managed worker loop. Every `--schedule-interval-ms`
+Default mode is a supervisor-managed worker loop. Every `--schedule-interval-ms`
 tick it processes contiguous 15-minute UTC windows until it is caught up or
 `--max-windows-per-tick` is reached. It never skips intermediate windows:
 if only the latest ready window is pending the current window is LIVE; if older
@@ -183,9 +222,10 @@ windows are still missing it is CATCH-UP. On SIGTERM, the worker finishes the
 current window and exits before starting another window or sleep cycle.
 `MARKET_NORMALIZE_MAX_LATENCY_MS` controls when valid events are counted as
 `quality_delayed` instead of `quality_ok`.
-`MARKET_NORMALIZE_L0_RUN_KEY_OVERLAP_MS` controls the conservative L0 run-id
-timestamp filter used after hourly S3 listing; keep it greater than or equal to
-the L0 ingest duration so boundary files are not dropped.
+`--l0-run-key-overlap-ms` controls the conservative L0 run-id timestamp filter
+used after hourly S3 listing. The supervisor default is 360000 ms, separate from
+the realtime worker lifetime, so a long-running task does not force L1 to scan a
+year of L0 run prefixes every tick.
 
 ```bash
 sudo docker compose \
@@ -263,10 +303,10 @@ This app is complete for L0 ingest when:
 
 ## Docker Compose
 
-The compose unit runs Binance, Upbit, and `market-normalize` as separate
-services using the same image. L0 venue services are duration-based, so compose
-runs each service for a finite window and restarts it after a normal exit. L1 is
-a long-lived worker service and owns its own sleep/drain loop.
+The compose unit is a local verification harness and may run Binance, Upbit, and
+`market-normalize` as separate services using the same image. ECS production is
+not split into separate services; it runs the all-in-one supervisor as the only
+container entrypoint.
 
 The Linux checkout path is `/home/seongwon/nangman-crypto`. The container app
 root remains `/opt/nangman-crypto`, and host-local runtime state such as

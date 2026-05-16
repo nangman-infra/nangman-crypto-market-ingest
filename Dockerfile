@@ -34,6 +34,9 @@ COPY --from=builder \
     /opt/nangman-crypto/target/release/market-backfill \
     /usr/local/bin/market-backfill
 COPY --from=builder \
+    /opt/nangman-crypto/target/release/crypto-market-ingest-supervisor \
+    /usr/local/bin/crypto-market-ingest-supervisor
+COPY --from=builder \
     /opt/nangman-crypto/config \
     /opt/nangman-crypto/strategies/crypto/rust-engine/config
 
@@ -41,4 +44,4 @@ USER market-ingest
 
 ENV AWS_SDK_LOAD_CONFIG=1
 
-ENTRYPOINT ["/usr/local/bin/market-ingest-app"]
+ENTRYPOINT ["/usr/local/bin/crypto-market-ingest-supervisor"]

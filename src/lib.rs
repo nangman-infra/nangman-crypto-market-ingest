@@ -6,4 +6,5 @@ pub mod log_stream;
 pub mod normalize;
 pub mod shutdown;
 pub mod storage;
+pub mod supervisor;
 pub mod upbit;
