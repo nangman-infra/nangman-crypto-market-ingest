@@ -67,6 +67,7 @@ jobs:
         run: |
           cargo install cargo-llvm-cov --locked
           cargo llvm-cov --all-targets --lcov --output-path sonar-reports/lcov.info
+          test -s sonar-reports/lcov.info
 
       - name: Run SonarQube scan
         uses: SonarSource/sonarqube-scan-action@v7
@@ -96,17 +97,36 @@ jobs:
             exit 0
           fi
 
-          task_json="$(curl --fail --silent --user "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/ce/task?id=${ce_task_id}")"
-          analysis_id="$(python3 -c 'import json, sys; print(json.load(sys.stdin).get("task", {}).get("analysisId", ""))' <<< "${task_json}")"
+          task_json="$(curl --silent --show-error --user "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/ce/task?id=${ce_task_id}" || true)"
+          if [ -z "${task_json}" ]; then
+            echo "SonarQube task response was empty."
+            exit 0
+          fi
+
+          analysis_id="$(python3 -c 'import json, sys
+          try:
+              print(json.load(sys.stdin).get("task", {}).get("analysisId", ""))
+          except Exception:
+              print("")
+          ' <<< "${task_json}")"
           if [ -z "${analysis_id}" ]; then
             echo "SonarQube analysis id was not available yet."
             exit 0
           fi
 
-          gate_json="$(curl --fail --silent --user "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/qualitygates/project_status?analysisId=${analysis_id}")"
+          gate_json="$(curl --silent --show-error --user "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/qualitygates/project_status?analysisId=${analysis_id}" || true)"
+          if [ -z "${gate_json}" ]; then
+            echo "SonarQube quality gate response was empty."
+            exit 0
+          fi
+
           python3 -c '
           import json, sys
-          data = json.load(sys.stdin)
+          try:
+              data = json.load(sys.stdin)
+          except Exception as error:
+              print("SonarQube quality gate response was not JSON: {}".format(error))
+              sys.exit(0)
           status = data.get("projectStatus", {})
           print("SonarQube quality gate: {}".format(status.get("status", "UNKNOWN")))
           for condition in status.get("conditions", []):
@@ -121,10 +141,19 @@ jobs:
               )
           ' <<< "${gate_json}"
 
-          issues_json="$(curl --fail --silent --user "${SONAR_TOKEN}:" --get "${SONAR_HOST_URL}/api/issues/search" --data-urlencode "componentKeys=nangman-crypto-market-ingest" --data-urlencode "resolved=false" --data-urlencode "inNewCodePeriod=true" --data-urlencode "ps=20")"
+          issues_json="$(curl --silent --show-error --user "${SONAR_TOKEN}:" --get "${SONAR_HOST_URL}/api/issues/search" --data-urlencode "componentKeys=nangman-crypto-market-ingest" --data-urlencode "resolved=false" --data-urlencode "inNewCodePeriod=true" --data-urlencode "ps=20" || true)"
+          if [ -z "${issues_json}" ]; then
+            echo "SonarQube issue response was empty."
+            exit 0
+          fi
+
           python3 -c '
           import json, sys
-          data = json.load(sys.stdin)
+          try:
+              data = json.load(sys.stdin)
+          except Exception as error:
+              print("SonarQube issue response was not JSON: {}".format(error))
+              sys.exit(0)
           for issue in data.get("issues", []):
               location = "{}:{}".format(issue.get("component", "unknown"), issue.get("line", "n/a"))
               print(

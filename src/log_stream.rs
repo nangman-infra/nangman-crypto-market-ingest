@@ -130,4 +130,24 @@ mod tests {
         assert!(Level::Warn >= Level::Info);
         assert!(Level::Debug < Level::Info);
     }
+
+    #[test]
+    fn envelope_keeps_contract_fields_and_nested_payload() {
+        let output = envelope(Level::Warn, "source_degraded", json!({"venue":"binance"}));
+
+        assert_eq!(output["schema_version"], SCHEMA_VERSION);
+        assert_eq!(output["app"], APP_NAME);
+        assert_eq!(output["level"], "warn");
+        assert_eq!(output["event"], "source_degraded");
+        assert_eq!(output["fields"]["venue"], "binance");
+        assert!(output["timestamp_ms"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn level_names_are_stable_lowercase_values() {
+        assert_eq!(level_name(Level::Debug), "debug");
+        assert_eq!(level_name(Level::Info), "info");
+        assert_eq!(level_name(Level::Warn), "warn");
+        assert_eq!(level_name(Level::Error), "error");
+    }
 }
