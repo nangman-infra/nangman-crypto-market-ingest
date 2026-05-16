@@ -38,7 +38,7 @@ pub(super) fn raw_partition_for(
     record: &RawMarketEventRecord,
     shard_count: u16,
 ) -> RawPartitionKey {
-    let parts = time_parts(record.ingest_timestamp_ms);
+    let parts = time_parts(record.exchange_timestamp_ms);
     RawPartitionKey {
         venue: record.venue.clone(),
         event_type: record.event_type.clone(),
@@ -284,7 +284,7 @@ mod tests {
             base_asset: "BTC".to_owned(),
             quote_asset: "USDT".to_owned(),
             exchange_timestamp_ms: 1_778_893_200_000,
-            ingest_timestamp_ms: 1_778_893_200_000,
+            ingest_timestamp_ms: 1_778_979_600_000,
             sequence_id: "binance:trade:1".to_owned(),
             sequence_tag: "binance:trade:1".to_owned(),
             exchange_sequence: Some(1),
