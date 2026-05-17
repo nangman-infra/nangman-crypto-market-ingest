@@ -290,6 +290,9 @@ async fn run_normalize_worker(
 }
 
 fn spawn_s3_retention_loops(args: &NormalizeArgs) -> Vec<JoinHandle<()>> {
+    if !args.s3_retention_enabled {
+        return Vec::new();
+    }
     let interval_secs = args.s3_retention_check_interval_secs;
     [
         (

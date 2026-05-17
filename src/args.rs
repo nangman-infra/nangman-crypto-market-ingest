@@ -37,6 +37,7 @@ pub struct Args {
     pub local_disk_emergency_pct: u8,
     pub safety_floor_hours: i64,
     pub eviction_check_interval_secs: u64,
+    pub s3_retention_enabled: bool,
     pub s3_retention_days: i64,
     pub s3_retention_check_interval_secs: u64,
     pub s3_retention_max_deletes_per_run: usize,
@@ -72,6 +73,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>
         local_disk_emergency_pct: DEFAULT_EMERGENCY_PCT,
         safety_floor_hours: DEFAULT_SAFETY_FLOOR_HOURS,
         eviction_check_interval_secs: DEFAULT_EVICTION_CHECK_INTERVAL_SECS,
+        s3_retention_enabled: true,
         s3_retention_days: DEFAULT_S3_RETENTION_DAYS,
         s3_retention_check_interval_secs: DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS,
         s3_retention_max_deletes_per_run: DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN,
@@ -198,6 +200,9 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>
                         .ok_or("--eviction-check-interval-secs requires a positive integer")?,
                     "--eviction-check-interval-secs",
                 )?;
+            }
+            "--disable-s3-retention" => {
+                parsed.s3_retention_enabled = false;
             }
             "--s3-retention-days" => {
                 parsed.s3_retention_days = parse_positive_i64(

@@ -3,6 +3,33 @@
 All-in-one public market data ingest package for the AI-DLC Alpha Discovery
 runtime.
 
+## Production Contract
+
+`nangman-crypto-market-ingest` is the canonical deterministic market-truth
+ingress app for Nangman Crypto. Production runs one Docker image, one ECS
+service, and one supervisor entrypoint:
+
+```text
+cluster:  ecs-nangman-dev-invest-apn2
+service:  svc-nangman-dev-crypto-market-ingest
+compute:  Fargate Spot, ARM64
+task:     td-nangman-dev-crypto-market-ingest
+image:    ecr-nangman-dev-crypto-market-ingest-apn2
+logs:     /ecs/nangman/dev/crypto-market-ingest
+```
+
+The current dev buckets are:
+
+```text
+L0: nangman-crypto-dev-market-ingest-l0-962214
+L1: nangman-crypto-dev-market-ingest-l1-962214
+```
+
+The app is intentionally stateless at the compute layer. ECS task replacement,
+Fargate Spot interruption, or deploy restart must be safe because progress is
+derived from S3 markers and L1 success pointers, not from local process memory.
+The local filesystem is only an in-task hot spool.
+
 The production container entrypoint is `crypto-market-ingest-supervisor`. One
 ECS service runs one task and the supervisor starts three internal workers:
 
@@ -11,16 +38,24 @@ ECS service runs one task and the supervisor starts three internal workers:
 - `market-normalize`: L0-to-L1 normalization loop.
 
 Default production behavior is automatic. On task start, realtime Binance L0
-ingest begins immediately, L1 normalization begins immediately, and Binance
-historical bootstrap fills the missing 210-day L0 range in bounded chunks. The
-bootstrap scheduler records success markers under the L1 bucket:
+ingest begins immediately and Binance historical bootstrap fills the missing
+210-day L0 range in stable UTC-day chunks. Long-lived L1 normalization is
+deferred while bootstrap is incomplete; the supervisor runs one-shot 15-minute
+L1 normalize subchunks after each L0 bootstrap chunk, then starts the long-lived
+normalize worker after all bootstrap chunks are complete.
+
+Bootstrap markers are written under the L1 bucket:
 
 ```text
 supervisor/bootstrap/venue=binance/start_ms={start_ms}/end_ms={end_ms}/success.json
+supervisor/bootstrap/venue=binance/start_ms={start_ms}/end_ms={end_ms}/complete.json
 ```
 
-The marker is the idempotency contract. If the task restarts, already completed
-chunks are skipped and the next missing chunk resumes.
+`success.json` means the L0 backfill chunk completed. `complete.json` means the
+same chunk has completed both L0 backfill and L1 normalization. `complete.json`
+is the idempotency contract used to skip completed bootstrap chunks after task
+restart. If a task stops mid-chunk, the missing L0 or L1 segment is retried on
+the next task start instead of mutating partial files in place.
 
 This app only reads public market streams:
 
@@ -54,20 +89,97 @@ It does not use private APIs, credentials, AI hot-path decisions, order placemen
 
 ## Runtime triggers
 
-- Task start: supervisor starts realtime L0, L1 normalize, and the bootstrap
-  scheduler.
+- Task start: supervisor starts realtime L0 and the bootstrap scheduler.
 - Realtime worker exit: supervisor exits non-zero so ECS restarts the task.
 - Normalize worker exit: supervisor restarts only the normalize worker after a
   bounded delay.
-- Bootstrap chunk success: supervisor writes the L1 marker and moves to the next
+- Bootstrap enabled: supervisor defers the long-lived normalize worker until
+  bootstrap completes, avoiding concurrent normalizers in one task.
+- Bootstrap L0 success: supervisor writes `success.json`.
+- Bootstrap L1 success: supervisor writes `complete.json` and moves to the next
   missing chunk after `--bootstrap-interval-secs`.
-- Bootstrap chunk failure: supervisor leaves the marker absent, waits, and
-  retries the same chunk later.
+- Bootstrap failure: supervisor leaves the relevant marker absent, waits, and
+  retries the same missing work later.
 - SIGTERM: supervisor stops children and exits cleanly.
 
 The default L0 app-owned retention is 45 days. The default L1 app-owned
 retention is 240 days. S3 lifecycle remains a secondary cleanup guard, not the
 primary data-management owner.
+
+## ECS Operations
+
+Production deploys should keep the app as one ECS service. Do not split
+realtime, backfill, and normalize into separate ECS services unless the
+supervisor contract is intentionally replaced.
+
+Recommended dev shape:
+
+- Capacity provider: `FARGATE_SPOT` with `weight=1`, `base=0`.
+- Runtime platform: `LINUX/ARM64`.
+- Task size: start with `2 vCPU / 4 GB` while 210-day bootstrap is running.
+- CloudWatch log retention: 3 days.
+- ECR lifecycle: retain the latest 5 pushed images.
+- Container image: distroless runtime, non-root user.
+
+Useful read-only checks:
+
+```bash
+aws ecs describe-services \
+  --profile AdministratorAccess-791444962214 \
+  --region ap-northeast-2 \
+  --cluster ecs-nangman-dev-invest-apn2 \
+  --services svc-nangman-dev-crypto-market-ingest \
+  --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount,capacityProviderStrategy:capacityProviderStrategy,rollout:deployments[0].rolloutState,taskDefinition:taskDefinition}'
+```
+
+```bash
+aws logs filter-log-events \
+  --profile AdministratorAccess-791444962214 \
+  --region ap-northeast-2 \
+  --log-group-name /ecs/nangman/dev/crypto-market-ingest \
+  --filter-pattern 'market_backfill_done || market_normalize_finished || crypto_market_ingest_bootstrap_chunk_done || error || panic || SIGKILL || OutOfMemory'
+```
+
+```bash
+aws s3api list-objects-v2 \
+  --profile AdministratorAccess-791444962214 \
+  --region ap-northeast-2 \
+  --bucket nangman-crypto-dev-market-ingest-l1-962214 \
+  --prefix supervisor/bootstrap/ \
+  --query 'sort_by(Contents || `[]`, &LastModified)[-10:].{key:Key,size:Size,lastModified:LastModified}'
+```
+
+## S3 Prefix Contract
+
+L0 stores immutable raw public market truth and run evidence:
+
+```text
+raw_market_event/venue={venue}/event_type={event_type}/event_date=YYYY-MM-DD/hour=HH/shard=00/run_id={run_id}-part-NNNNNN.parquet
+source_health/venue={venue}/event_date=YYYY-MM-DD/hour=HH/shard=00/run_id={run_id}-part-NNNNNN.parquet
+symbol_health/venue={venue}/event_date=YYYY-MM-DD/hour=HH/shard=00/run_id={run_id}-part-NNNNNN.parquet
+gap_alert/venue={venue}/gap_type={gap_type}/event_date=YYYY-MM-DD/hour=HH/shard=00/run_id={run_id}-part-NNNNNN.parquet
+runs/run_id={run_id}/manifest.json
+```
+
+L1 stores normalized market slices, success-only index pointers, manifests,
+reports, universe bootstrap rollups, and supervisor markers:
+
+```text
+normalized_market_slice/window_ms=1000/event_date=YYYY-MM-DD/hour=HH/run_id={l1_run_id}-part-NNNNNN.parquet
+l1_index/window_ms=1000/event_date=YYYY-MM-DD/hour=HH/window_start_ms={ms}.json
+normalization_report/run_id={l1_run_id}.json
+runs/run_id={l1_run_id}/manifest.json
+symbol_universe_snapshot/bootstrap_rollup/event_date=YYYY-MM-DD/latest.json
+supervisor/bootstrap/venue=binance/start_ms={start_ms}/end_ms={end_ms}/{success,complete}.json
+```
+
+Consumers must read L1 through the success pointer path:
+
+```text
+l1_index pointer -> l1_manifest_v1 -> normalization_report_v1 -> output_object_keys
+```
+
+They must not treat arbitrary L1 prefix listing as canonical state.
 
 ## Binance
 
@@ -391,15 +503,26 @@ Log levels:
 
 Events:
 
+- `crypto_market_ingest_supervisor_start`
+- `crypto_market_ingest_normalize_deferred`
+- `crypto_market_ingest_bootstrap_chunk_start`
+- `crypto_market_ingest_bootstrap_l0_done`
+- `crypto_market_ingest_bootstrap_l1_done`
+- `crypto_market_ingest_bootstrap_chunk_done`
+- `crypto_market_ingest_bootstrap_complete`
+- `crypto_market_ingest_s3_retention_run`
 - `market_ingest_start`
 - `market_ingest_report`
 - `market_ingest_eviction_run`
+- `market_backfill_done`
+- `market_backfill_s3_retention_run`
 - `market_normalize_preflight_ok`
 - `market_normalize_worker_started`
 - `market_normalize_worker_stopped`
 - `market_normalize_index_published`
 - `market_normalize_l1_index_audit`
 - `market_normalize_finished`
+- `market_normalize_s3_retention_run`
 - `market_normalize_fallback_alert`
 - `market_ingest_error`
 

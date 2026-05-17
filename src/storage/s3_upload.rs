@@ -90,6 +90,20 @@ impl S3Uploader {
         prefix: &str,
     ) -> Result<Vec<S3ObjectSummary>, StorageError> {
         let mut objects = Vec::new();
+        self.for_each_object_summary(prefix, |object| objects.push(object))
+            .await?;
+        objects.sort_by(|left, right| left.key.cmp(&right.key));
+        Ok(objects)
+    }
+
+    pub async fn for_each_object_summary<F>(
+        &self,
+        prefix: &str,
+        mut visit: F,
+    ) -> Result<(), StorageError>
+    where
+        F: FnMut(S3ObjectSummary),
+    {
         let mut continuation_token: Option<String> = None;
 
         loop {
@@ -112,7 +126,7 @@ impl S3Uploader {
 
             for object in output.contents() {
                 if let Some(key) = object.key() {
-                    objects.push(S3ObjectSummary {
+                    visit(S3ObjectSummary {
                         key: key.to_owned(),
                         last_modified_ms: object
                             .last_modified()
@@ -131,8 +145,7 @@ impl S3Uploader {
             continuation_token = Some(next_token.to_owned());
         }
 
-        objects.sort_by(|left, right| left.key.cmp(&right.key));
-        Ok(objects)
+        Ok(())
     }
 
     pub async fn list_keys_page(

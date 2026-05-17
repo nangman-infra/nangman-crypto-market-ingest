@@ -1,9 +1,14 @@
 use crate::log_stream;
+use crate::normalize::write::index_pointer_key;
 use crate::shutdown::ShutdownListener;
-use crate::storage::s3_upload::S3Uploader;
+use crate::storage::{
+    S3RetentionLoopEvents, abort_s3_retention_handles, l0_s3_retention_config,
+    l1_s3_retention_config, s3_upload::S3Uploader, spawn_s3_retention_loop,
+};
 use serde_json::json;
 use std::error::Error;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -26,6 +31,10 @@ const DEFAULT_BOOTSTRAP_CHUNK_HOURS: i64 = 24;
 const DEFAULT_BOOTSTRAP_INTERVAL_SECS: u64 = 60;
 const DEFAULT_REALTIME_DURATION_SECONDS: u64 = 31_536_000;
 const DEFAULT_L0_RUN_KEY_OVERLAP_MS: i64 = 360_000;
+const DEFAULT_L0_S3_RETENTION_DAYS: i64 = 45;
+const DEFAULT_L1_S3_RETENTION_DAYS: i64 = 240;
+const DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS: u64 = 21_600;
+const DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN: usize = 1_000;
 
 #[derive(Debug, Clone)]
 pub struct SupervisorArgs {
@@ -54,6 +63,10 @@ pub struct SupervisorArgs {
     pub normalize_schedule_interval_ms: i64,
     pub l0_run_key_overlap_ms: i64,
     pub normalize_max_windows_per_tick: usize,
+    pub l0_s3_retention_days: i64,
+    pub l1_s3_retention_days: i64,
+    pub s3_retention_check_interval_secs: u64,
+    pub s3_retention_max_deletes_per_run: usize,
     pub restart_delay_secs: u64,
 }
 
@@ -86,6 +99,10 @@ pub fn parse_args(
         normalize_schedule_interval_ms: 900_000,
         l0_run_key_overlap_ms: DEFAULT_L0_RUN_KEY_OVERLAP_MS,
         normalize_max_windows_per_tick: 192,
+        l0_s3_retention_days: DEFAULT_L0_S3_RETENTION_DAYS,
+        l1_s3_retention_days: DEFAULT_L1_S3_RETENTION_DAYS,
+        s3_retention_check_interval_secs: DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS,
+        s3_retention_max_deletes_per_run: DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN,
         restart_delay_secs: DEFAULT_RESTART_DELAY_SECS,
     };
 
@@ -169,6 +186,24 @@ pub fn parse_args(
                 parsed.normalize_max_windows_per_tick =
                     parse_positive_usize(next_arg(&mut args, "--normalize-max-windows-per-tick")?)?;
             }
+            "--l0-s3-retention-days" => {
+                parsed.l0_s3_retention_days =
+                    parse_positive_i64(next_arg(&mut args, "--l0-s3-retention-days")?)?;
+            }
+            "--l1-s3-retention-days" => {
+                parsed.l1_s3_retention_days =
+                    parse_positive_i64(next_arg(&mut args, "--l1-s3-retention-days")?)?;
+            }
+            "--s3-retention-check-interval-secs" => {
+                parsed.s3_retention_check_interval_secs =
+                    parse_positive_u64(next_arg(&mut args, "--s3-retention-check-interval-secs")?)?;
+            }
+            "--s3-retention-max-deletes-per-run" => {
+                parsed.s3_retention_max_deletes_per_run = parse_positive_usize(next_arg(
+                    &mut args,
+                    "--s3-retention-max-deletes-per-run",
+                )?)?;
+            }
             "--restart-delay-secs" => {
                 parsed.restart_delay_secs =
                     parse_positive_u64(next_arg(&mut args, "--restart-delay-secs")?)?;
@@ -182,6 +217,11 @@ pub fn parse_args(
     }
     if parsed.bootstrap_lookback_days > 0 && parsed.bootstrap_chunk_hours > 24 {
         return Err("--bootstrap-chunk-hours must be <= 24 to keep recovery chunks bounded".into());
+    }
+    if 24 % parsed.bootstrap_chunk_hours != 0 {
+        return Err(
+            "--bootstrap-chunk-hours must evenly divide 24 for stable UTC day partitions".into(),
+        );
     }
     Ok(Some(parsed))
 }
@@ -226,8 +266,17 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
     });
 
     let mut realtime = spawn_realtime(&args)?;
-    let mut normalize = spawn_normalize(&args)?;
+    let mut normalize = if args.bootstrap_enabled {
+        log_stream::info(
+            "crypto_market_ingest_normalize_deferred",
+            json!({ "reason": "bootstrap_l0_l1_in_progress" }),
+        )?;
+        None
+    } else {
+        Some(spawn_normalize(&args)?)
+    };
     let mut backfill_scheduler = spawn_backfill_scheduler(args.clone(), &shutdown_requested);
+    let mut retention_handles = Some(spawn_supervisor_s3_retention_loops(&args));
     let restart_delay = Duration::from_secs(args.restart_delay_secs);
 
     loop {
@@ -236,14 +285,16 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
                 let status = realtime_status?;
                 shutdown_task.abort();
                 shutdown_requested.store(true, Ordering::SeqCst);
-                kill_child(&mut normalize).await;
+                kill_optional_child(&mut normalize).await;
                 backfill_scheduler.abort();
+                abort_supervisor_retention(&mut retention_handles).await;
                 return Err(format!("realtime worker exited: {status}").into());
             }
-            normalize_status = normalize.wait() => {
-                let status = normalize_status?;
+            normalize_status = wait_optional_child(&mut normalize) => {
+                let status = normalize_status.expect("pending normalize wait cannot complete without a child")?;
                 if shutdown_requested.load(Ordering::SeqCst) {
                     backfill_scheduler.abort();
+                    abort_supervisor_retention(&mut retention_handles).await;
                     return Ok(());
                 }
                 log_stream::warn(
@@ -251,20 +302,26 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
                     json!({ "exit_status": status.to_string(), "restart_delay_secs": args.restart_delay_secs }),
                 )?;
                 tokio::time::sleep(restart_delay).await;
-                normalize = spawn_normalize(&args)?;
+                normalize = Some(spawn_normalize(&args)?);
             }
             backfill_result = &mut backfill_scheduler => {
                 if shutdown_requested.load(Ordering::SeqCst) {
                     kill_child(&mut realtime).await;
-                    kill_child(&mut normalize).await;
+                    kill_optional_child(&mut normalize).await;
+                    abort_supervisor_retention(&mut retention_handles).await;
                     return Ok(());
                 }
                 match backfill_result {
                     Ok(Ok(())) => {
-                        log_stream::warn(
-                            "crypto_market_ingest_backfill_scheduler_stopped",
-                            json!({ "restart_delay_secs": args.restart_delay_secs }),
+                        log_stream::info(
+                            "crypto_market_ingest_bootstrap_complete",
+                            json!({ "next_worker": "normalize" }),
                         )?;
+                        if normalize.is_none() {
+                            normalize = Some(spawn_normalize(&args)?);
+                        }
+                        backfill_scheduler = spawn_idle_backfill_scheduler(&shutdown_requested);
+                        continue;
                     }
                     Ok(Err(error)) => {
                         log_stream::warn(
@@ -286,11 +343,63 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
                 shutdown_requested.store(true, Ordering::SeqCst);
                 log_stream::info("crypto_market_ingest_supervisor_shutdown", json!({}))?;
                 kill_child(&mut realtime).await;
-                kill_child(&mut normalize).await;
+                kill_optional_child(&mut normalize).await;
                 backfill_scheduler.abort();
+                abort_supervisor_retention(&mut retention_handles).await;
                 return Ok(());
             }
         }
+    }
+}
+
+async fn wait_optional_child(child: &mut Option<Child>) -> Option<std::io::Result<ExitStatus>> {
+    match child {
+        Some(child) => Some(child.wait().await),
+        None => std::future::pending().await,
+    }
+}
+
+fn spawn_supervisor_s3_retention_loops(args: &SupervisorArgs) -> Vec<JoinHandle<()>> {
+    [
+        (
+            "l0",
+            l0_s3_retention_config(
+                args.l0_s3_bucket.clone(),
+                args.aws_region.clone(),
+                args.aws_profile.clone(),
+                args.l0_s3_retention_days,
+                args.s3_retention_max_deletes_per_run,
+            ),
+        ),
+        (
+            "l1",
+            l1_s3_retention_config(
+                args.l1_s3_bucket.clone(),
+                args.aws_region.clone(),
+                args.aws_profile.clone(),
+                args.l1_s3_retention_days,
+                args.s3_retention_max_deletes_per_run,
+            ),
+        ),
+    ]
+    .into_iter()
+    .map(|(layer, config)| {
+        spawn_s3_retention_loop(
+            layer,
+            config,
+            args.s3_retention_check_interval_secs,
+            S3RetentionLoopEvents {
+                run_event: "crypto_market_ingest_s3_retention_run",
+                error_event: "crypto_market_ingest_s3_retention_error",
+            },
+        )
+    })
+    .collect()
+}
+
+async fn abort_supervisor_retention(handles: &mut Option<Vec<JoinHandle<()>>>) {
+    if let Some(handles) = handles.take() {
+        abort_s3_retention_handles(handles).await;
     }
 }
 
@@ -328,6 +437,16 @@ fn spawn_backfill_scheduler(
     tokio::spawn(async move { run_backfill_scheduler(args, shutdown_requested).await })
 }
 
+fn spawn_idle_backfill_scheduler(
+    shutdown_requested: &Arc<AtomicBool>,
+) -> JoinHandle<Result<(), String>> {
+    let shutdown_requested = Arc::clone(shutdown_requested);
+    tokio::spawn(async move {
+        wait_until_shutdown(&shutdown_requested).await;
+        Ok(())
+    })
+}
+
 async fn run_backfill_scheduler(
     args: SupervisorArgs,
     shutdown_requested: Arc<AtomicBool>,
@@ -356,8 +475,7 @@ async fn run_backfill_scheduler(
                 }),
             )
             .map_err(|error| error.to_string())?;
-            sleep_or_shutdown(&shutdown_requested, args.bootstrap_interval_secs).await;
-            continue;
+            return Ok(());
         };
         run_backfill_chunk(&args, &marker_store, chunk, &shutdown_requested).await?;
         sleep_or_shutdown(&shutdown_requested, args.bootstrap_interval_secs).await;
@@ -376,11 +494,49 @@ async fn run_backfill_chunk(
             "venue": "binance",
             "input_start_ms": chunk.start_ms,
             "input_end_ms": chunk.end_ms,
-            "marker_key": marker_store.marker_key(&chunk)
+            "l0_marker_key": marker_store.l0_marker_key(&chunk),
+            "complete_marker_key": marker_store.complete_marker_key(&chunk)
         }),
     )
     .map_err(|error| error.to_string())?;
 
+    if marker_store.has_l0_success(&chunk).await? {
+        log_stream::info(
+            "crypto_market_ingest_bootstrap_l0_skip",
+            json!({
+                "input_start_ms": chunk.start_ms,
+                "input_end_ms": chunk.end_ms,
+                "reason": "l0_marker_exists"
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+    } else if run_backfill_child(args, chunk, shutdown_requested).await? {
+        marker_store.mark_l0_success(&chunk).await?;
+    } else {
+        return Ok(());
+    }
+
+    if !run_l1_normalize_chunk(args, marker_store, chunk, shutdown_requested).await? {
+        return Ok(());
+    }
+    marker_store.mark_complete(&chunk).await?;
+    log_stream::info(
+        "crypto_market_ingest_bootstrap_chunk_done",
+        json!({
+            "input_start_ms": chunk.start_ms,
+            "input_end_ms": chunk.end_ms,
+            "complete_marker_key": marker_store.complete_marker_key(&chunk)
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn run_backfill_child(
+    args: &SupervisorArgs,
+    chunk: BootstrapChunk,
+    shutdown_requested: &Arc<AtomicBool>,
+) -> Result<bool, String> {
     let mut command = Command::new(&args.backfill_bin);
     command.args(backfill_args(args, &chunk));
     let mut child = command
@@ -390,13 +546,12 @@ async fn run_backfill_chunk(
     loop {
         if shutdown_requested.load(Ordering::SeqCst) {
             kill_child(&mut child).await;
-            return Ok(());
+            return Ok(false);
         }
         match child.try_wait().map_err(|error| error.to_string())? {
             Some(status) if status.success() => {
-                marker_store.mark_success(&chunk).await?;
                 log_stream::info(
-                    "crypto_market_ingest_bootstrap_chunk_done",
+                    "crypto_market_ingest_bootstrap_l0_done",
                     json!({
                         "input_start_ms": chunk.start_ms,
                         "input_end_ms": chunk.end_ms,
@@ -404,11 +559,11 @@ async fn run_backfill_chunk(
                     }),
                 )
                 .map_err(|error| error.to_string())?;
-                return Ok(());
+                return Ok(true);
             }
             Some(status) => {
                 log_stream::warn(
-                    "crypto_market_ingest_bootstrap_chunk_failed",
+                    "crypto_market_ingest_bootstrap_l0_failed",
                     json!({
                         "input_start_ms": chunk.start_ms,
                         "input_end_ms": chunk.end_ms,
@@ -416,11 +571,82 @@ async fn run_backfill_chunk(
                     }),
                 )
                 .map_err(|error| error.to_string())?;
-                return Ok(());
+                return Ok(false);
             }
             None => tokio::time::sleep(Duration::from_secs(2)).await,
         }
     }
+}
+
+async fn run_l1_normalize_chunk(
+    args: &SupervisorArgs,
+    marker_store: &BootstrapMarkerStore,
+    chunk: BootstrapChunk,
+    shutdown_requested: &Arc<AtomicBool>,
+) -> Result<bool, String> {
+    for subchunk in normalize_subchunks(args, chunk) {
+        if marker_store.has_l1_success(&subchunk).await? {
+            log_stream::debug(
+                "crypto_market_ingest_bootstrap_l1_skip",
+                json!({
+                    "input_start_ms": subchunk.start_ms,
+                    "input_end_ms": subchunk.end_ms,
+                    "reason": "l1_index_exists"
+                }),
+            )
+            .map_err(|error| error.to_string())?;
+            continue;
+        }
+        log_stream::info(
+            "crypto_market_ingest_bootstrap_l1_start",
+            json!({
+                "input_start_ms": subchunk.start_ms,
+                "input_end_ms": subchunk.end_ms
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut command = Command::new(&args.normalize_bin);
+        command.args(normalize_backfill_args(args, &subchunk));
+        let mut child = command
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        loop {
+            if shutdown_requested.load(Ordering::SeqCst) {
+                kill_child(&mut child).await;
+                return Ok(false);
+            }
+            match child.try_wait().map_err(|error| error.to_string())? {
+                Some(status) if status.success() => {
+                    log_stream::info(
+                        "crypto_market_ingest_bootstrap_l1_done",
+                        json!({
+                            "input_start_ms": subchunk.start_ms,
+                            "input_end_ms": subchunk.end_ms,
+                            "exit_status": status.to_string()
+                        }),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    break;
+                }
+                Some(status) => {
+                    log_stream::warn(
+                        "crypto_market_ingest_bootstrap_l1_failed",
+                        json!({
+                            "input_start_ms": subchunk.start_ms,
+                            "input_end_ms": subchunk.end_ms,
+                            "exit_status": status.to_string()
+                        }),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    return Ok(false);
+                }
+                None => tokio::time::sleep(Duration::from_secs(2)).await,
+            }
+        }
+    }
+    Ok(true)
 }
 
 async fn next_missing_bootstrap_chunk(
@@ -428,7 +654,7 @@ async fn next_missing_bootstrap_chunk(
     marker_store: &BootstrapMarkerStore,
 ) -> Result<Option<BootstrapChunk>, String> {
     for chunk in bootstrap_chunks(args, unix_timestamp_millis()) {
-        if !marker_store.has_success(&chunk).await? {
+        if !marker_store.has_complete(&chunk).await? {
             return Ok(Some(chunk));
         }
     }
@@ -457,18 +683,51 @@ impl BootstrapMarkerStore {
         Ok(Self { uploader })
     }
 
-    async fn has_success(&self, chunk: &BootstrapChunk) -> Result<bool, String> {
+    async fn has_complete(&self, chunk: &BootstrapChunk) -> Result<bool, String> {
         let marker = self
             .uploader
-            .download_json_optional::<serde_json::Value>(&self.marker_key(chunk))
+            .download_json_optional::<serde_json::Value>(&self.complete_marker_key(chunk))
             .await
             .map_err(|error| error.to_string())?;
         Ok(marker.is_some())
     }
 
-    async fn mark_success(&self, chunk: &BootstrapChunk) -> Result<(), String> {
+    async fn has_l0_success(&self, chunk: &BootstrapChunk) -> Result<bool, String> {
+        let marker = self
+            .uploader
+            .download_json_optional::<serde_json::Value>(&self.l0_marker_key(chunk))
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(marker.is_some())
+    }
+
+    async fn has_l1_success(&self, chunk: &BootstrapChunk) -> Result<bool, String> {
+        let pointer_key = index_pointer_key(1_000, chunk.start_ms);
+        let Some(pointer) = self
+            .uploader
+            .download_json_optional::<serde_json::Value>(&pointer_key)
+            .await
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(false);
+        };
+        Ok(pointer
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|status| status == "success")
+            && pointer
+                .get("input_time_range_start_ms")
+                .and_then(serde_json::Value::as_i64)
+                == Some(chunk.start_ms)
+            && pointer
+                .get("input_time_range_end_ms")
+                .and_then(serde_json::Value::as_i64)
+                == Some(chunk.end_ms))
+    }
+
+    async fn mark_l0_success(&self, chunk: &BootstrapChunk) -> Result<(), String> {
         let payload = serde_json::to_vec(&json!({
-            "schema_version": "crypto_market_ingest_bootstrap_marker_v1",
+            "schema_version": "crypto_market_ingest_bootstrap_l0_marker_v1",
             "venue": "binance",
             "input_start_ms": chunk.start_ms,
             "input_end_ms": chunk.end_ms,
@@ -476,14 +735,37 @@ impl BootstrapMarkerStore {
         }))
         .map_err(|error| error.to_string())?;
         self.uploader
-            .upload_json(&self.marker_key(chunk), payload)
+            .upload_json(&self.l0_marker_key(chunk), payload)
             .await
             .map_err(|error| error.to_string())
     }
 
-    fn marker_key(&self, chunk: &BootstrapChunk) -> String {
+    async fn mark_complete(&self, chunk: &BootstrapChunk) -> Result<(), String> {
+        let payload = serde_json::to_vec(&json!({
+            "schema_version": "crypto_market_ingest_bootstrap_complete_marker_v1",
+            "venue": "binance",
+            "input_start_ms": chunk.start_ms,
+            "input_end_ms": chunk.end_ms,
+            "l0_marker_key": self.l0_marker_key(chunk),
+            "completed_at_ms": unix_timestamp_millis()
+        }))
+        .map_err(|error| error.to_string())?;
+        self.uploader
+            .upload_json(&self.complete_marker_key(chunk), payload)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    fn l0_marker_key(&self, chunk: &BootstrapChunk) -> String {
         format!(
             "supervisor/bootstrap/venue=binance/start_ms={}/end_ms={}/success.json",
+            chunk.start_ms, chunk.end_ms
+        )
+    }
+
+    fn complete_marker_key(&self, chunk: &BootstrapChunk) -> String {
+        format!(
+            "supervisor/bootstrap/venue=binance/start_ms={}/end_ms={}/complete.json",
             chunk.start_ms, chunk.end_ms
         )
     }
@@ -495,10 +777,13 @@ fn bootstrap_chunks(args: &SupervisorArgs, now_ms: i64) -> Vec<BootstrapChunk> {
         .saturating_mul(24)
         .saturating_mul(3_600_000);
     let chunk_ms = args.bootstrap_chunk_hours.saturating_mul(3_600_000);
-    let start_ms = now_ms.saturating_sub(lookback_ms);
+    if chunk_ms <= 0 {
+        return Vec::new();
+    }
+    let end_bound = align_down_to_chunk(now_ms.saturating_sub(3_600_000), chunk_ms);
+    let start_bound = align_down_to_chunk(end_bound.saturating_sub(lookback_ms), chunk_ms);
     let mut chunks = Vec::new();
-    let mut cursor = align_down_to_hour(start_ms);
-    let end_bound = align_down_to_hour(now_ms.saturating_sub(3_600_000));
+    let mut cursor = start_bound;
     while cursor < end_bound {
         let end_ms = cursor.saturating_add(chunk_ms).min(end_bound);
         if end_ms > cursor {
@@ -507,6 +792,27 @@ fn bootstrap_chunks(args: &SupervisorArgs, now_ms: i64) -> Vec<BootstrapChunk> {
                 end_ms,
             });
         }
+        cursor = end_ms;
+    }
+    chunks
+}
+
+fn normalize_subchunks(args: &SupervisorArgs, chunk: BootstrapChunk) -> Vec<BootstrapChunk> {
+    let interval_ms = args.normalize_schedule_interval_ms;
+    if interval_ms <= 0 || chunk.end_ms <= chunk.start_ms {
+        return Vec::new();
+    }
+    let mut chunks = Vec::new();
+    let mut cursor = chunk.start_ms;
+    while cursor < chunk.end_ms {
+        let end_ms = cursor.saturating_add(interval_ms).min(chunk.end_ms);
+        if end_ms <= cursor {
+            break;
+        }
+        chunks.push(BootstrapChunk {
+            start_ms: cursor,
+            end_ms,
+        });
         cursor = end_ms;
     }
     chunks
@@ -537,6 +843,7 @@ fn realtime_args(args: &SupervisorArgs) -> Vec<String> {
         args.l0_shard_count.to_string(),
         "--s3-retention-days".to_owned(),
         "45".to_owned(),
+        "--disable-s3-retention".to_owned(),
     ];
     if args.realtime_venue == "binance" {
         values.extend([
@@ -576,6 +883,7 @@ fn backfill_args(args: &SupervisorArgs, chunk: &BootstrapChunk) -> Vec<String> {
         args.l0_shard_count.to_string(),
         "--s3-retention-days".to_owned(),
         "45".to_owned(),
+        "--disable-s3-retention".to_owned(),
     ];
     if let Some(symbols) = &args.bootstrap_symbols {
         values.extend(["--symbols".to_owned(), symbols.join(",")]);
@@ -623,10 +931,22 @@ fn normalize_args(args: &SupervisorArgs) -> Vec<String> {
         "45".to_owned(),
         "--l1-s3-retention-days".to_owned(),
         "240".to_owned(),
+        "--disable-s3-retention".to_owned(),
     ];
     if let Some(profile) = &args.aws_profile {
         values.extend(["--aws-profile".to_owned(), profile.clone()]);
     }
+    values
+}
+
+fn normalize_backfill_args(args: &SupervisorArgs, chunk: &BootstrapChunk) -> Vec<String> {
+    let mut values = normalize_args(args);
+    values.extend([
+        "--input-start-ms".to_owned(),
+        chunk.start_ms.to_string(),
+        "--input-end-ms".to_owned(),
+        chunk.end_ms.to_string(),
+    ]);
     values
 }
 
@@ -650,6 +970,12 @@ async fn kill_child(child: &mut Child) {
         return;
     }
     let _ = child.kill().await;
+}
+
+async fn kill_optional_child(child: &mut Option<Child>) {
+    if let Some(child) = child {
+        kill_child(child).await;
+    }
 }
 
 fn next_arg(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, Box<dyn Error>> {
@@ -709,8 +1035,8 @@ fn unix_timestamp_millis() -> i64 {
         .unwrap_or(0)
 }
 
-fn align_down_to_hour(value: i64) -> i64 {
-    value.div_euclid(3_600_000) * 3_600_000
+fn align_down_to_chunk(value: i64, chunk_ms: i64) -> i64 {
+    value.div_euclid(chunk_ms) * chunk_ms
 }
 
 #[cfg(test)]
@@ -773,6 +1099,42 @@ mod tests {
         );
         assert!(chunks.iter().all(|chunk| chunk.start_ms % 3_600_000 == 0));
         assert!(chunks.iter().all(|chunk| chunk.end_ms % 3_600_000 == 0));
+        assert!(chunks.iter().all(|chunk| chunk.start_ms % 21_600_000 == 0));
+        assert!(chunks.iter().all(|chunk| chunk.end_ms % 21_600_000 == 0));
+    }
+
+    #[test]
+    fn bootstrap_chunks_do_not_shift_within_same_chunk_boundary() {
+        let mut args = parse_args(Vec::<String>::new().into_iter())
+            .unwrap()
+            .unwrap();
+        args.bootstrap_lookback_days = 2;
+        args.bootstrap_chunk_hours = 24;
+        let chunks_before = bootstrap_chunks(&args, 1778979600123);
+        let chunks_after = bootstrap_chunks(&args, 1779004800123);
+
+        assert_eq!(chunks_before, chunks_after);
+        assert_eq!(chunks_before.len(), 2);
+        assert!(
+            chunks_before
+                .windows(2)
+                .all(|pair| pair[0].end_ms == pair[1].start_ms)
+        );
+        assert!(
+            chunks_before
+                .iter()
+                .all(|chunk| chunk.start_ms % 86_400_000 == 0 && chunk.end_ms % 86_400_000 == 0)
+        );
+    }
+
+    #[test]
+    fn rejects_unstable_bootstrap_chunk_hours() {
+        let err =
+            parse_args(vec!["--bootstrap-chunk-hours".to_owned(), "7".to_owned()].into_iter())
+                .unwrap_err()
+                .to_string();
+
+        assert!(err.contains("evenly divide 24"));
     }
 
     #[test]
@@ -792,6 +1154,63 @@ mod tests {
             values
                 .windows(2)
                 .any(|pair| pair[0] == "--symbols" && pair[1] == "BTCUSDT")
+        );
+    }
+
+    #[test]
+    fn bootstrap_l1_normalize_subchunks_use_schedule_interval() {
+        let mut args = parse_args(Vec::<String>::new().into_iter())
+            .unwrap()
+            .unwrap();
+        args.normalize_schedule_interval_ms = 900_000;
+
+        let chunks = normalize_subchunks(
+            &args,
+            BootstrapChunk {
+                start_ms: 0,
+                end_ms: 3_600_000,
+            },
+        );
+
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(
+            chunks.first(),
+            Some(&BootstrapChunk {
+                start_ms: 0,
+                end_ms: 900_000
+            })
+        );
+        assert_eq!(
+            chunks.last(),
+            Some(&BootstrapChunk {
+                start_ms: 2_700_000,
+                end_ms: 3_600_000
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_backfill_args_add_explicit_input_range() {
+        let args = parse_args(Vec::<String>::new().into_iter())
+            .unwrap()
+            .unwrap();
+        let values = normalize_backfill_args(
+            &args,
+            &BootstrapChunk {
+                start_ms: 900_000,
+                end_ms: 1_800_000,
+            },
+        );
+
+        assert!(
+            values
+                .windows(2)
+                .any(|pair| pair[0] == "--input-start-ms" && pair[1] == "900000")
+        );
+        assert!(
+            values
+                .windows(2)
+                .any(|pair| pair[0] == "--input-end-ms" && pair[1] == "1800000")
         );
     }
 

@@ -144,6 +144,9 @@ pub async fn run_backfill(args: BackfillArgs) -> Result<(), BackfillError> {
 }
 
 async fn log_l0_retention_cleanup(args: &BackfillArgs) -> Result<(), BackfillError> {
+    if !args.s3_retention_enabled {
+        return Ok(());
+    }
     let config = S3RetentionConfig {
         bucket: args.l0_s3_bucket.clone(),
         region: args.aws_region.clone(),

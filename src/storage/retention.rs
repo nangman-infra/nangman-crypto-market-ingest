@@ -1,6 +1,7 @@
 use super::StorageError;
 use super::s3_upload::{S3ObjectSummary, S3Uploader};
 use serde::Serialize;
+#[cfg(test)]
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,7 @@ struct RetentionDeleteCandidate {
     age_secs: i64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RetentionDeletePlan {
     stats: S3RetentionStats,
@@ -103,15 +105,24 @@ async fn run_s3_retention_once_with_uploader(
     now_ms: i64,
     uploader: &S3Uploader,
 ) -> Result<S3RetentionStats, StorageError> {
-    let mut objects = Vec::new();
+    let mut stats = S3RetentionStats::default();
+    let mut delete_candidates = Vec::new();
 
     for prefix in &config.prefixes {
-        objects.extend(uploader.list_object_summaries(prefix).await?);
+        uploader
+            .for_each_object_summary(prefix, |object| {
+                observe_retention_object(
+                    config,
+                    now_ms,
+                    object,
+                    &mut stats,
+                    &mut delete_candidates,
+                );
+            })
+            .await?;
     }
 
-    let plan = plan_retention_deletes(config, now_ms, objects);
-    let mut stats = plan.stats;
-    for candidate in plan.delete_candidates {
+    for candidate in delete_candidates {
         match uploader.delete_object(&candidate.key).await {
             Ok(()) => {
                 stats.deleted_object_count += 1;
@@ -125,6 +136,7 @@ async fn run_s3_retention_once_with_uploader(
     Ok(stats)
 }
 
+#[cfg(test)]
 fn plan_retention_deletes<I>(
     config: &S3RetentionConfig,
     now_ms: i64,
@@ -141,29 +153,39 @@ where
         if !seen.insert(object.key.clone()) {
             continue;
         }
-        stats.scanned_object_count += 1;
-        match retention_decision(config, now_ms, &object) {
-            RetentionDecision::Keep => {}
-            RetentionDecision::MissingLastModified => stats.missing_last_modified_count += 1,
-            RetentionDecision::Protected => stats.protected_object_count += 1,
-            RetentionDecision::Delete { age_secs } => {
-                stats.expired_object_count += 1;
-                if delete_candidates.len() >= config.max_deletes_per_run {
-                    stats.stopped_at_delete_limit = true;
-                    continue;
-                }
-                delete_candidates.push(RetentionDeleteCandidate {
-                    key: object.key,
-                    size_bytes: object.size_bytes,
-                    age_secs,
-                });
-            }
-        }
+        observe_retention_object(config, now_ms, object, &mut stats, &mut delete_candidates);
     }
 
     RetentionDeletePlan {
         stats,
         delete_candidates,
+    }
+}
+
+fn observe_retention_object(
+    config: &S3RetentionConfig,
+    now_ms: i64,
+    object: S3ObjectSummary,
+    stats: &mut S3RetentionStats,
+    delete_candidates: &mut Vec<RetentionDeleteCandidate>,
+) {
+    stats.scanned_object_count += 1;
+    match retention_decision(config, now_ms, &object) {
+        RetentionDecision::Keep => {}
+        RetentionDecision::MissingLastModified => stats.missing_last_modified_count += 1,
+        RetentionDecision::Protected => stats.protected_object_count += 1,
+        RetentionDecision::Delete { age_secs } => {
+            stats.expired_object_count += 1;
+            if delete_candidates.len() >= config.max_deletes_per_run {
+                stats.stopped_at_delete_limit = true;
+                return;
+            }
+            delete_candidates.push(RetentionDeleteCandidate {
+                key: object.key,
+                size_bytes: object.size_bytes,
+                age_secs,
+            });
+        }
     }
 }
 

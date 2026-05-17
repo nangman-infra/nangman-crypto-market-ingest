@@ -60,6 +60,9 @@ fn spawn_eviction_loop(args: &Args) -> Option<JoinHandle<()>> {
 }
 
 fn spawn_l0_s3_retention_loop(args: &Args) -> Option<JoinHandle<()>> {
+    if !args.s3_retention_enabled {
+        return None;
+    }
     let bucket = args.l0_s3_bucket.clone()?;
     let config = l0_s3_retention_config(
         bucket,

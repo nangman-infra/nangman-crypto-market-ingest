@@ -46,6 +46,7 @@ pub struct NormalizeArgs {
     pub max_windows_per_tick: usize,
     pub live_priority: bool,
     pub live_priority_lag_threshold_ms: i64,
+    pub s3_retention_enabled: bool,
     pub l0_s3_retention_days: i64,
     pub l1_s3_retention_days: i64,
     pub s3_retention_check_interval_secs: u64,
@@ -85,6 +86,7 @@ pub fn parse_args(
         max_windows_per_tick: DEFAULT_MAX_WINDOWS_PER_TICK,
         live_priority: false,
         live_priority_lag_threshold_ms: DEFAULT_LIVE_PRIORITY_LAG_THRESHOLD_MS,
+        s3_retention_enabled: true,
         l0_s3_retention_days: DEFAULT_L0_S3_RETENTION_DAYS,
         l1_s3_retention_days: DEFAULT_L1_S3_RETENTION_DAYS,
         s3_retention_check_interval_secs: DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS,
@@ -184,6 +186,9 @@ pub fn parse_args(
             "--live-priority-lag-threshold-ms" => {
                 parsed.live_priority_lag_threshold_ms =
                     parse_positive_i64(args.next(), "--live-priority-lag-threshold-ms")?;
+            }
+            "--disable-s3-retention" => {
+                parsed.s3_retention_enabled = false;
             }
             "--s3-retention-days" => {
                 let retention_days = parse_positive_i64(args.next(), "--s3-retention-days")?;

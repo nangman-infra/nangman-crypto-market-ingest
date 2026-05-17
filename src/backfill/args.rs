@@ -24,6 +24,7 @@ pub struct BackfillArgs {
     pub l0_spool_root: PathBuf,
     pub l0_flush_records: usize,
     pub l0_shard_count: u16,
+    pub s3_retention_enabled: bool,
     pub s3_retention_days: i64,
     pub s3_retention_max_deletes_per_run: usize,
 }
@@ -61,6 +62,7 @@ pub fn parse_args(
         l0_spool_root: PathBuf::from(DEFAULT_L0_SPOOL_ROOT),
         l0_flush_records: 1_000,
         l0_shard_count: 1,
+        s3_retention_enabled: true,
         s3_retention_days: DEFAULT_S3_RETENTION_DAYS,
         s3_retention_max_deletes_per_run: DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN,
     };
@@ -171,6 +173,9 @@ pub fn parse_args(
                     })?,
                     "--l0-shard-count",
                 )?;
+            }
+            "--disable-s3-retention" => {
+                parsed.s3_retention_enabled = false;
             }
             "--s3-retention-days" => {
                 parsed.s3_retention_days = parse_positive_i64(
