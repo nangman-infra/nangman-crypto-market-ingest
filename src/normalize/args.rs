@@ -504,12 +504,14 @@ mod tests {
             "3600".to_owned(),
             "--s3-retention-max-deletes-per-run".to_owned(),
             "50".to_owned(),
+            "--disable-s3-retention".to_owned(),
         ];
         let parsed = parse_args(raw.into_iter()).unwrap().unwrap();
         assert_eq!(parsed.l0_s3_retention_days, 365);
         assert_eq!(parsed.l1_s3_retention_days, 365);
         assert_eq!(parsed.s3_retention_check_interval_secs, 3600);
         assert_eq!(parsed.s3_retention_max_deletes_per_run, 50);
+        assert!(!parsed.s3_retention_enabled);
     }
 
     #[test]

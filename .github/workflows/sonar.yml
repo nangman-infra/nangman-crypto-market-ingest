@@ -97,18 +97,27 @@ jobs:
             exit 0
           fi
 
-          task_json="$(curl --silent --show-error --user "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/ce/task?id=${ce_task_id}" || true)"
-          if [ -z "${task_json}" ]; then
-            echo "SonarQube task response was empty."
-            exit 0
-          fi
+          analysis_id=""
+          for attempt in $(seq 1 10); do
+            task_json="$(curl --silent --show-error --user "${SONAR_TOKEN}:" "${SONAR_HOST_URL}/api/ce/task?id=${ce_task_id}" || true)"
+            if [ -z "${task_json}" ]; then
+              echo "SonarQube task response was empty."
+              exit 0
+            fi
 
-          analysis_id="$(python3 -c 'import json, sys
-          try:
-              print(json.load(sys.stdin).get("task", {}).get("analysisId", ""))
-          except Exception:
-              print("")
-          ' <<< "${task_json}")"
+            analysis_id="$(python3 -c 'import json, sys
+            try:
+                print(json.load(sys.stdin).get("task", {}).get("analysisId", ""))
+            except Exception:
+                print("")
+            ' <<< "${task_json}")"
+            if [ -n "${analysis_id}" ]; then
+              break
+            fi
+            echo "SonarQube analysis id was not available yet; retry ${attempt}/10."
+            sleep 3
+          done
+
           if [ -z "${analysis_id}" ]; then
             echo "SonarQube analysis id was not available yet."
             exit 0
