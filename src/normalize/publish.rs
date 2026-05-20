@@ -39,263 +39,355 @@ pub async fn publish_outputs(
         args.aws_profile.clone(),
     )
     .await?;
-    let mut output_keys = Vec::new();
+    let mut published_keys = PublishedOutputKeys::default();
+
     if build.status == "success" {
-        for (key, row_indices) in group_slices(l1_run_id, args.window_ms, &build.slices) {
-            let rows = row_indices
-                .iter()
-                .map(|index| &build.slices[*index])
-                .collect::<Vec<_>>();
-            let path = local_output_path(&args.spool_root, l1_run_id, &key);
-            write_slice_parquet_refs(&path, &rows)?;
-            let bytes = file_size_best_effort(&path).await.unwrap_or(0);
-            log_stream::debug(
-                "market_normalize_publishing",
-                json!({
-                    "phase": "upload_parquet",
-                    "l1_run_id": l1_run_id,
-                    "key": key,
-                    "bytes": bytes,
-                    "row_count": rows.len()
-                }),
-            )?;
-            uploader.upload_file(&key, &path).await?;
-            output_keys.push(key);
-            remove_file_best_effort(&path).await;
-        }
-    }
-    output_keys.sort();
-
-    let mut published_keys = PublishedOutputKeys {
-        slice_output_keys: output_keys,
-        market_data_quality_summary_key: None,
-        market_feature_delta_key: None,
-        market_feature_delta_summary_key: None,
-        market_regime_context_key: None,
-        symbol_universe_snapshot_key: None,
-        symbol_universe_bootstrap_rollup_key: None,
-    };
-    if build.status == "success" {
-        let quality_key = market_data_quality_summary_object_key(l1_run_id);
-        {
-            let quality_summary = build_market_data_quality_summary(
-                l1_run_id,
-                input_range,
-                finished_at_ms,
-                &build.slices,
-            );
-            let bytes = serde_json::to_vec(&quality_summary)?;
-            uploader.upload_json(&quality_key, bytes).await?;
-        }
-        published_keys.market_data_quality_summary_key = Some(quality_key);
-
-        let feature_delta_key = market_feature_delta_object_key(l1_run_id);
-        let feature_delta_summary_key = market_feature_delta_summary_object_key(l1_run_id);
-        let feature_delta_count;
-        let feature_delta_bytes;
-        let feature_delta_summary_count;
-        let feature_delta_summary_bytes;
-        {
-            let feature_deltas = build_market_feature_deltas(
-                l1_run_id,
-                input_range,
-                finished_at_ms,
-                &build.projection_slices,
-                &build.projection_derivative_metrics,
-            );
-            feature_delta_count = feature_deltas.len();
-            let feature_delta_summary = build_market_feature_delta_summary(
-                l1_run_id,
-                input_range,
-                finished_at_ms,
-                &feature_delta_key,
-                &feature_deltas,
-            );
-            feature_delta_summary_count = feature_delta_summary.summary_row_count;
-            feature_delta_summary_bytes = serde_json::to_vec(&feature_delta_summary)?;
-            feature_delta_bytes = serde_json::to_vec(&feature_deltas)?;
-            drop(feature_deltas);
-        }
-        log_stream::debug(
-            "market_normalize_publishing",
-            json!({
-                "phase": "upload_market_feature_delta_summary",
-                "l1_run_id": l1_run_id,
-                "key": &feature_delta_summary_key,
-                "summary_row_count": feature_delta_summary_count,
-                "detail_record_count": feature_delta_count,
-                "bytes": feature_delta_summary_bytes.len()
-            }),
-        )?;
-        uploader
-            .upload_json(&feature_delta_summary_key, feature_delta_summary_bytes)
-            .await?;
-        published_keys.market_feature_delta_summary_key = Some(feature_delta_summary_key);
-        log_stream::debug(
-            "market_normalize_publishing",
-            json!({
-                "phase": "upload_market_feature_delta",
-                "l1_run_id": l1_run_id,
-                "key": &feature_delta_key,
-                "record_count": feature_delta_count,
-                "bytes": feature_delta_bytes.len()
-            }),
-        )?;
-        uploader
-            .upload_json(&feature_delta_key, feature_delta_bytes)
-            .await?;
-        published_keys.market_feature_delta_key = Some(feature_delta_key);
-
-        let regime_context_key = market_regime_context_object_key(l1_run_id);
-        let regime_context_count;
-        let regime_context_bytes;
-        {
-            let regime_contexts = build_market_regime_contexts(
-                l1_run_id,
-                input_range,
-                finished_at_ms,
-                &build.projection_slices,
-            );
-            regime_context_count = regime_contexts.len();
-            regime_context_bytes = serde_json::to_vec(&regime_contexts)?;
-            drop(regime_contexts);
-        }
-        log_stream::debug(
-            "market_normalize_publishing",
-            json!({
-                "phase": "upload_market_regime_context",
-                "l1_run_id": l1_run_id,
-                "key": &regime_context_key,
-                "record_count": regime_context_count,
-                "bytes": regime_context_bytes.len()
-            }),
-        )?;
-        uploader
-            .upload_json(&regime_context_key, regime_context_bytes)
-            .await?;
-        published_keys.market_regime_context_key = Some(regime_context_key);
-        build.projection_slices.clear();
-        build.projection_slices.shrink_to_fit();
-        build.projection_derivative_metrics.clear();
-        build.projection_derivative_metrics.shrink_to_fit();
-
-        let expected_rollup_day_count = bootstrap_rollup_day_starts(input_range).len();
-        log_stream::debug(
-            "market_normalize_bootstrap_rollup",
-            json!({
-                "phase": "read_recent_start",
-                "l1_run_id": l1_run_id,
-                "expected_rollup_day_count": expected_rollup_day_count
-            }),
-        )?;
-        let mut bootstrap_rollup_read =
-            read_recent_symbol_universe_bootstrap_rollups(&uploader, input_range, l1_run_id)
-                .await?;
-        let loaded_rollup_count = bootstrap_rollup_read.rollups.len();
-        log_stream::debug(
-            "market_normalize_bootstrap_rollup",
-            json!({
-                "phase": "read_recent_finished",
-                "l1_run_id": l1_run_id,
-                "loaded_rollup_count": loaded_rollup_count,
-                "missing_rollup_count": bootstrap_rollup_read.missing_count,
-                "invalid_rollup_count": bootstrap_rollup_read.invalid_count,
-                "expected_rollup_day_count": expected_rollup_day_count
-            }),
-        )?;
-        let current_rollups = build_symbol_universe_bootstrap_rollups(
+        published_keys.slice_output_keys =
+            publish_slice_parquets(&uploader, args, l1_run_id, &build.slices).await?;
+        publish_quality_summary(
+            &uploader,
             l1_run_id,
             input_range,
             finished_at_ms,
             &build.slices,
-        );
-        let current_rollup_count = current_rollups.len();
-        if current_rollup_count == 0 {
-            log_stream::warn(
-                "market_normalize_bootstrap_rollup",
-                json!({
-                    "phase": "current_empty",
-                    "l1_run_id": l1_run_id,
-                    "slice_count_total": build.slices.len()
-                }),
-            )?;
-        }
-        let mut published_rollup_keys = Vec::new();
-        for current_rollup in current_rollups {
-            let key = symbol_universe_bootstrap_rollup_object_key(current_rollup.day_start_ms);
-            let existing = bootstrap_rollup_read
-                .rollups
-                .iter()
-                .position(|rollup| rollup.day_start_ms == current_rollup.day_start_ms)
-                .map(|index| bootstrap_rollup_read.rollups.remove(index));
-            let merged_rollup = merge_symbol_universe_bootstrap_rollup(existing, current_rollup);
-            let symbol_count = merged_rollup.symbols.len();
-            let source_window_count = merged_rollup.source_windows.len();
-            let bytes = serde_json::to_vec(&merged_rollup)?;
-            log_stream::debug(
-                "market_normalize_bootstrap_rollup",
-                json!({
-                    "phase": "upload_current",
-                    "l1_run_id": l1_run_id,
-                    "key": &key,
-                    "symbol_count": symbol_count,
-                    "source_window_count": source_window_count,
-                    "bytes": bytes.len()
-                }),
-            )?;
-            uploader.upload_json(&key, bytes).await?;
-            bootstrap_rollup_read.rollups.push(merged_rollup);
-            published_rollup_keys.push(key);
-        }
-        published_rollup_keys.sort();
-        published_keys.symbol_universe_bootstrap_rollup_key =
-            published_rollup_keys.first().cloned();
-        log_stream::info(
-            "market_normalize_bootstrap_rollup",
-            json!({
-                "phase": "finished",
-                "l1_run_id": l1_run_id,
-                "loaded_rollup_count": loaded_rollup_count,
-                "missing_rollup_count": bootstrap_rollup_read.missing_count,
-                "invalid_rollup_count": bootstrap_rollup_read.invalid_count,
-                "current_rollup_count": current_rollup_count,
-                "published_rollup_count": published_rollup_keys.len(),
-                "published_rollup_keys": published_rollup_keys
-            }),
-        )?;
-
-        let universe_key = symbol_universe_snapshot_object_key(l1_run_id);
-        let universe_snapshot = build_symbol_universe_snapshot_from_bootstrap(
+            &mut published_keys,
+        )
+        .await?;
+        publish_feature_deltas(
+            &uploader,
             l1_run_id,
             input_range,
             finished_at_ms,
-            &build.slices,
-            &bootstrap_rollup_read.rollups,
-        );
-        let included_count = universe_snapshot.included_symbols.len();
-        let excluded_count = universe_snapshot.excluded_symbols.len();
-        let universe_bytes = serde_json::to_vec(&universe_snapshot)?;
-        drop(universe_snapshot);
-        drop(bootstrap_rollup_read);
-        log_stream::debug(
-            "market_normalize_publishing",
-            json!({
-                "phase": "upload_symbol_universe_snapshot",
-                "l1_run_id": l1_run_id,
-                "key": &universe_key,
-                "included_count": included_count,
-                "excluded_count": excluded_count,
-                "bytes": universe_bytes.len()
-            }),
-        )?;
-        uploader.upload_json(&universe_key, universe_bytes).await?;
-        published_keys.symbol_universe_snapshot_key = Some(universe_key);
+            &build,
+            &mut published_keys,
+        )
+        .await?;
+        publish_regime_contexts(
+            &uploader,
+            l1_run_id,
+            input_range,
+            finished_at_ms,
+            &mut build,
+            &mut published_keys,
+        )
+        .await?;
+        publish_bootstrap_rollup_and_universe(
+            &uploader,
+            l1_run_id,
+            input_range,
+            finished_at_ms,
+            &build,
+            &mut published_keys,
+        )
+        .await?;
     }
 
     let timing = RunTiming {
         started_at_ms,
         finished_at_ms,
     };
+    publish_manifest_and_index(
+        &uploader,
+        args,
+        l1_run_id,
+        input_range,
+        build,
+        timing,
+        published_keys,
+    )
+    .await
+}
+
+async fn publish_slice_parquets(
+    uploader: &S3Uploader,
+    args: &NormalizeArgs,
+    l1_run_id: &str,
+    slices: &[SliceRow],
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut output_keys = Vec::new();
+    for (key, row_indices) in group_slices(l1_run_id, args.window_ms, slices) {
+        let rows = row_indices
+            .iter()
+            .map(|index| &slices[*index])
+            .collect::<Vec<_>>();
+        let path = local_output_path(&args.spool_root, l1_run_id, &key);
+        write_slice_parquet_refs(&path, &rows)?;
+        let bytes = file_size_best_effort(&path).await.unwrap_or(0);
+        log_stream::debug(
+            "market_normalize_publishing",
+            json!({
+                "phase": "upload_parquet",
+                "l1_run_id": l1_run_id,
+                "key": key,
+                "bytes": bytes,
+                "row_count": rows.len()
+            }),
+        )?;
+        uploader.upload_file(&key, &path).await?;
+        output_keys.push(key);
+        remove_file_best_effort(&path).await;
+    }
+    output_keys.sort();
+    Ok(output_keys)
+}
+
+async fn publish_quality_summary(
+    uploader: &S3Uploader,
+    l1_run_id: &str,
+    input_range: InputRange,
+    finished_at_ms: i64,
+    slices: &[SliceRow],
+    published_keys: &mut PublishedOutputKeys,
+) -> Result<(), Box<dyn Error>> {
+    let quality_key = market_data_quality_summary_object_key(l1_run_id);
+    let quality_summary =
+        build_market_data_quality_summary(l1_run_id, input_range, finished_at_ms, slices);
+    let bytes = serde_json::to_vec(&quality_summary)?;
+    uploader.upload_json(&quality_key, bytes).await?;
+    published_keys.market_data_quality_summary_key = Some(quality_key);
+    Ok(())
+}
+
+async fn publish_feature_deltas(
+    uploader: &S3Uploader,
+    l1_run_id: &str,
+    input_range: InputRange,
+    finished_at_ms: i64,
+    build: &BuildResult,
+    published_keys: &mut PublishedOutputKeys,
+) -> Result<(), Box<dyn Error>> {
+    let feature_delta_key = market_feature_delta_object_key(l1_run_id);
+    let feature_delta_summary_key = market_feature_delta_summary_object_key(l1_run_id);
+    let feature_delta_count;
+    let feature_delta_bytes;
+    let feature_delta_summary_count;
+    let feature_delta_summary_bytes;
+    {
+        let feature_deltas = build_market_feature_deltas(
+            l1_run_id,
+            input_range,
+            finished_at_ms,
+            &build.projection_slices,
+            &build.projection_derivative_metrics,
+        );
+        feature_delta_count = feature_deltas.len();
+        let feature_delta_summary = build_market_feature_delta_summary(
+            l1_run_id,
+            input_range,
+            finished_at_ms,
+            &feature_delta_key,
+            &feature_deltas,
+        );
+        feature_delta_summary_count = feature_delta_summary.summary_row_count;
+        feature_delta_summary_bytes = serde_json::to_vec(&feature_delta_summary)?;
+        feature_delta_bytes = serde_json::to_vec(&feature_deltas)?;
+        drop(feature_deltas);
+    }
+    log_stream::debug(
+        "market_normalize_publishing",
+        json!({
+            "phase": "upload_market_feature_delta_summary",
+            "l1_run_id": l1_run_id,
+            "key": &feature_delta_summary_key,
+            "summary_row_count": feature_delta_summary_count,
+            "detail_record_count": feature_delta_count,
+            "bytes": feature_delta_summary_bytes.len()
+        }),
+    )?;
+    uploader
+        .upload_json(&feature_delta_summary_key, feature_delta_summary_bytes)
+        .await?;
+    published_keys.market_feature_delta_summary_key = Some(feature_delta_summary_key);
+    log_stream::debug(
+        "market_normalize_publishing",
+        json!({
+            "phase": "upload_market_feature_delta",
+            "l1_run_id": l1_run_id,
+            "key": &feature_delta_key,
+            "record_count": feature_delta_count,
+            "bytes": feature_delta_bytes.len()
+        }),
+    )?;
+    uploader
+        .upload_json(&feature_delta_key, feature_delta_bytes)
+        .await?;
+    published_keys.market_feature_delta_key = Some(feature_delta_key);
+    Ok(())
+}
+
+async fn publish_regime_contexts(
+    uploader: &S3Uploader,
+    l1_run_id: &str,
+    input_range: InputRange,
+    finished_at_ms: i64,
+    build: &mut BuildResult,
+    published_keys: &mut PublishedOutputKeys,
+) -> Result<(), Box<dyn Error>> {
+    let regime_context_key = market_regime_context_object_key(l1_run_id);
+    let regime_context_count;
+    let regime_context_bytes;
+    {
+        let regime_contexts = build_market_regime_contexts(
+            l1_run_id,
+            input_range,
+            finished_at_ms,
+            &build.projection_slices,
+        );
+        regime_context_count = regime_contexts.len();
+        regime_context_bytes = serde_json::to_vec(&regime_contexts)?;
+        drop(regime_contexts);
+    }
+    log_stream::debug(
+        "market_normalize_publishing",
+        json!({
+            "phase": "upload_market_regime_context",
+            "l1_run_id": l1_run_id,
+            "key": &regime_context_key,
+            "record_count": regime_context_count,
+            "bytes": regime_context_bytes.len()
+        }),
+    )?;
+    uploader
+        .upload_json(&regime_context_key, regime_context_bytes)
+        .await?;
+    published_keys.market_regime_context_key = Some(regime_context_key);
+    // projection inputs are large and no longer needed once delta+regime are published.
+    build.projection_slices.clear();
+    build.projection_slices.shrink_to_fit();
+    build.projection_derivative_metrics.clear();
+    build.projection_derivative_metrics.shrink_to_fit();
+    Ok(())
+}
+
+async fn publish_bootstrap_rollup_and_universe(
+    uploader: &S3Uploader,
+    l1_run_id: &str,
+    input_range: InputRange,
+    finished_at_ms: i64,
+    build: &BuildResult,
+    published_keys: &mut PublishedOutputKeys,
+) -> Result<(), Box<dyn Error>> {
+    let expected_rollup_day_count = bootstrap_rollup_day_starts(input_range).len();
+    log_stream::debug(
+        "market_normalize_bootstrap_rollup",
+        json!({
+            "phase": "read_recent_start",
+            "l1_run_id": l1_run_id,
+            "expected_rollup_day_count": expected_rollup_day_count
+        }),
+    )?;
+    let mut bootstrap_rollup_read =
+        read_recent_symbol_universe_bootstrap_rollups(uploader, input_range, l1_run_id).await?;
+    let loaded_rollup_count = bootstrap_rollup_read.rollups.len();
+    log_stream::debug(
+        "market_normalize_bootstrap_rollup",
+        json!({
+            "phase": "read_recent_finished",
+            "l1_run_id": l1_run_id,
+            "loaded_rollup_count": loaded_rollup_count,
+            "missing_rollup_count": bootstrap_rollup_read.missing_count,
+            "invalid_rollup_count": bootstrap_rollup_read.invalid_count,
+            "expected_rollup_day_count": expected_rollup_day_count
+        }),
+    )?;
+    let current_rollups = build_symbol_universe_bootstrap_rollups(
+        l1_run_id,
+        input_range,
+        finished_at_ms,
+        &build.slices,
+    );
+    let current_rollup_count = current_rollups.len();
+    if current_rollup_count == 0 {
+        log_stream::warn(
+            "market_normalize_bootstrap_rollup",
+            json!({
+                "phase": "current_empty",
+                "l1_run_id": l1_run_id,
+                "slice_count_total": build.slices.len()
+            }),
+        )?;
+    }
+    let mut published_rollup_keys = Vec::new();
+    for current_rollup in current_rollups {
+        let key = symbol_universe_bootstrap_rollup_object_key(current_rollup.day_start_ms);
+        let existing = bootstrap_rollup_read
+            .rollups
+            .iter()
+            .position(|rollup| rollup.day_start_ms == current_rollup.day_start_ms)
+            .map(|index| bootstrap_rollup_read.rollups.remove(index));
+        let merged_rollup = merge_symbol_universe_bootstrap_rollup(existing, current_rollup);
+        let symbol_count = merged_rollup.symbols.len();
+        let source_window_count = merged_rollup.source_windows.len();
+        let bytes = serde_json::to_vec(&merged_rollup)?;
+        log_stream::debug(
+            "market_normalize_bootstrap_rollup",
+            json!({
+                "phase": "upload_current",
+                "l1_run_id": l1_run_id,
+                "key": &key,
+                "symbol_count": symbol_count,
+                "source_window_count": source_window_count,
+                "bytes": bytes.len()
+            }),
+        )?;
+        uploader.upload_json(&key, bytes).await?;
+        bootstrap_rollup_read.rollups.push(merged_rollup);
+        published_rollup_keys.push(key);
+    }
+    published_rollup_keys.sort();
+    published_keys.symbol_universe_bootstrap_rollup_key = published_rollup_keys.first().cloned();
+    log_stream::info(
+        "market_normalize_bootstrap_rollup",
+        json!({
+            "phase": "finished",
+            "l1_run_id": l1_run_id,
+            "loaded_rollup_count": loaded_rollup_count,
+            "missing_rollup_count": bootstrap_rollup_read.missing_count,
+            "invalid_rollup_count": bootstrap_rollup_read.invalid_count,
+            "current_rollup_count": current_rollup_count,
+            "published_rollup_count": published_rollup_keys.len(),
+            "published_rollup_keys": published_rollup_keys
+        }),
+    )?;
+
+    let universe_key = symbol_universe_snapshot_object_key(l1_run_id);
+    let universe_snapshot = build_symbol_universe_snapshot_from_bootstrap(
+        l1_run_id,
+        input_range,
+        finished_at_ms,
+        &build.slices,
+        &bootstrap_rollup_read.rollups,
+    );
+    let included_count = universe_snapshot.included_symbols.len();
+    let excluded_count = universe_snapshot.excluded_symbols.len();
+    let universe_bytes = serde_json::to_vec(&universe_snapshot)?;
+    drop(universe_snapshot);
+    drop(bootstrap_rollup_read);
+    log_stream::debug(
+        "market_normalize_publishing",
+        json!({
+            "phase": "upload_symbol_universe_snapshot",
+            "l1_run_id": l1_run_id,
+            "key": &universe_key,
+            "included_count": included_count,
+            "excluded_count": excluded_count,
+            "bytes": universe_bytes.len()
+        }),
+    )?;
+    uploader.upload_json(&universe_key, universe_bytes).await?;
+    published_keys.symbol_universe_snapshot_key = Some(universe_key);
+    Ok(())
+}
+
+async fn publish_manifest_and_index(
+    uploader: &S3Uploader,
+    args: &NormalizeArgs,
+    l1_run_id: &str,
+    input_range: InputRange,
+    build: BuildResult,
+    timing: RunTiming,
+    published_keys: PublishedOutputKeys,
+) -> Result<(), Box<dyn Error>> {
     let report_key = report_object_key(l1_run_id);
     let manifest_key = manifest_object_key(l1_run_id);
     let report = report(
@@ -321,7 +413,7 @@ pub async fn publish_outputs(
     uploader
         .upload_json(&manifest_key, serde_json::to_vec_pretty(&manifest)?)
         .await?;
-    verify_manifest(&uploader, &args.spool_root, l1_run_id, &manifest_key).await?;
+    verify_manifest(uploader, &args.spool_root, l1_run_id, &manifest_key).await?;
 
     let mut index_pointer_count = 0usize;
     if report.status == "success" {
@@ -331,7 +423,7 @@ pub async fn publish_outputs(
                 &manifest_key,
                 l1_run_id,
                 report.status.as_str(),
-                finished_at_ms,
+                timing.finished_at_ms,
                 input_range,
                 window_start_ms,
                 args.window_ms,
@@ -367,7 +459,7 @@ pub async fn publish_outputs(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct PublishedOutputKeys {
     slice_output_keys: Vec<String>,
     market_data_quality_summary_key: Option<String>,

@@ -5,16 +5,18 @@ mod ws;
 
 use self::stats::UpbitIngestWatchStats;
 pub use self::universe::{UpbitMarket, fetch_top_krw_markets};
+use crate::clock;
 use crate::log_stream;
 use crate::storage::gap::GapAlertDraft;
 use crate::storage::health::SourceHealthDraft;
+use crate::storage::smoke_validation;
 use crate::storage::symbol_health::SymbolHealthDraft;
 use crate::storage::{L0StorageConfig, L0StorageSink, StorageReport};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt;
 use std::str::Utf8Error;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio_tungstenite::tungstenite;
 
 #[derive(Debug, Clone)]
@@ -290,57 +292,14 @@ fn validate_storage_report(
     report: &UpbitL0SmokeReport,
     storage: &StorageReport,
 ) -> Result<(), UpbitIngestError> {
-    validate_common_storage_report(storage, "Upbit")?;
-    if report.gap_alert_count > 0 && !storage_has_family(storage, "gap_alert") {
+    smoke_validation::validate_common_storage_report(storage, "Upbit")
+        .map_err(UpbitIngestError::InvalidMessage)?;
+    if report.gap_alert_count > 0 && !smoke_validation::storage_has_family(storage, "gap_alert") {
         return Err(UpbitIngestError::InvalidMessage(
             "Upbit L0 storage observed gaps but uploaded no gap_alert".to_owned(),
         ));
     }
     Ok(())
-}
-
-fn validate_common_storage_report(
-    storage: &StorageReport,
-    venue: &str,
-) -> Result<(), UpbitIngestError> {
-    if storage.failed_upload_count > 0 {
-        return Err(UpbitIngestError::InvalidMessage(format!(
-            "{venue} L0 storage exhausted retries for {} uploads",
-            storage.failed_upload_count
-        )));
-    }
-    if storage.record_count == 0 || storage.uploaded_object_count == 0 {
-        return Err(UpbitIngestError::InvalidMessage(format!(
-            "{venue} L0 storage produced no objects"
-        )));
-    }
-    if storage.manifest_key.is_none() {
-        return Err(UpbitIngestError::InvalidMessage(format!(
-            "{venue} L0 storage did not upload manifest.json"
-        )));
-    }
-    require_storage_family(storage, venue, "source_health")?;
-    require_storage_family(storage, venue, "symbol_health")
-}
-
-fn require_storage_family(
-    storage: &StorageReport,
-    venue: &str,
-    object_family: &str,
-) -> Result<(), UpbitIngestError> {
-    if storage_has_family(storage, object_family) {
-        return Ok(());
-    }
-    Err(UpbitIngestError::InvalidMessage(format!(
-        "{venue} L0 storage did not upload {object_family}"
-    )))
-}
-
-fn storage_has_family(storage: &StorageReport, object_family: &str) -> bool {
-    storage
-        .uploaded_objects
-        .iter()
-        .any(|object| object.object_family == object_family)
 }
 
 fn print_upbit_ingest_log(stats: &UpbitIngestWatchStats) {
@@ -365,7 +324,7 @@ fn print_upbit_ingest_log(stats: &UpbitIngestWatchStats) {
 }
 
 fn source_health_draft(stats: &UpbitIngestWatchStats) -> SourceHealthDraft {
-    let observed_at_ms = unix_timestamp_ms();
+    let observed_at_ms = clock::now_ms();
     SourceHealthDraft {
         venue: "upbit".to_owned(),
         source_role: "execution".to_owned(),
@@ -429,7 +388,7 @@ fn symbol_health_payload(
 }
 
 fn symbol_health_drafts(stats: &UpbitIngestWatchStats) -> Vec<SymbolHealthDraft> {
-    let observed_at_ms = unix_timestamp_ms();
+    let observed_at_ms = clock::now_ms();
     stats
         .symbol_counts
         .keys()
@@ -493,11 +452,4 @@ fn health_level(stats: &UpbitIngestWatchStats) -> String {
     } else {
         "degraded".to_owned()
     }
-}
-
-fn unix_timestamp_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }

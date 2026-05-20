@@ -1,157 +1,183 @@
 # market-ingest-app
 
-All-in-one public market data ingest package for the AI-DLC Alpha Discovery
-runtime.
+> Nangman Crypto의 deterministic L0/L1 market data ingestor.
+> 한 image, 한 ECS service, 한 supervisor가 세 worker를 띄워서
+> Binance/Upbit public market stream을 받아 S3에 immutable parquet으로 적재한다.
 
-## Production Contract
+- **L0**: raw market truth + health + gap. immutable append-only.
+- **L1**: 1초 단위 `normalized_market_slice` + success-only index pointer.
+- private API, account credential, AI hot-path 결정, 주문 경로는 사용하지 않는다.
 
-`nangman-crypto-market-ingest` is the canonical deterministic market-truth
-ingress app for Nangman Crypto. Production runs one Docker image, one ECS
-service, and one supervisor entrypoint:
+상세 계약은 [`docs/contracts/10-data/market-ingest-app-contract.md`](../../docs/contracts/10-data/market-ingest-app-contract.md)가 source of truth다.
+
+---
+
+## 목차
+
+- [TL;DR](#tldr)
+- [Architecture](#architecture)
+- [Workers](#workers)
+  - [market-ingest-app — realtime L0](#worker-1-market-ingest-app--realtime-l0)
+  - [market-backfill — historical L0](#worker-2-market-backfill--historical-l0)
+  - [market-normalize — L0 → L1](#worker-3-market-normalize--l0--l1)
+- [Data Contract (요약)](#data-contract-요약)
+- [Running](#running)
+  - [ECS production](#ecs-production)
+  - [Local Compose](#local-compose)
+  - [Manual smoke / audit](#manual-smoke--audit)
+- [Monitoring](#monitoring)
+- [DoD](#dod)
+
+---
+
+## TL;DR
 
 ```text
-cluster:  ecs-nangman-dev-invest-apn2
-service:  svc-nangman-dev-crypto-market-ingest
-compute:  Fargate Spot, ARM64
-task:     td-nangman-dev-crypto-market-ingest
-image:    ecr-nangman-dev-crypto-market-ingest-apn2
-logs:     /ecs/nangman/dev/crypto-market-ingest
+production:  ECS service 1개 = task 1개 = supervisor 1개 = worker 3개
+cluster:     ecs-nangman-dev-invest-apn2
+service:     svc-nangman-dev-crypto-market-ingest
+task:        td-nangman-dev-crypto-market-ingest (Fargate Spot, ARM64)
+image:       ecr-nangman-dev-crypto-market-ingest-apn2
+logs:        /ecs/nangman/dev/crypto-market-ingest
+
+dev buckets:
+  L0 = nangman-crypto-dev-market-ingest-l0-962214  (retention 45d)
+  L1 = nangman-crypto-dev-market-ingest-l1-962214  (retention 240d)
 ```
 
-The current dev buckets are:
+- compute layer는 stateless. ECS 재시작·Fargate Spot interruption·deploy restart 모두 안전.
+  진행 상황은 S3 marker와 L1 success pointer에서 복구한다.
+- bootstrap: realtime L0와 동시에 Binance 210일 historical L0를 UTC-day 청크로 채운다.
+- bootstrap 동안 long-lived normalize는 대기하고, 청크가 끝날 때마다 일회성 L1 normalize를 돌린다.
+- 모든 bootstrap 청크가 끝나면 long-lived normalize worker가 시작된다.
+
+---
+
+## Architecture
 
 ```text
-L0: nangman-crypto-dev-market-ingest-l0-962214
-L1: nangman-crypto-dev-market-ingest-l1-962214
+            ┌─────────────────────────────────────┐
+            │  crypto-market-ingest-supervisor    │  (ECS entrypoint)
+            └───────────────┬─────────────────────┘
+                            │ spawn / kill / restart
+        ┌───────────────────┼───────────────────────────┐
+        ▼                   ▼                           ▼
+ market-ingest-app   market-backfill               market-normalize
+ (realtime WS L0)    (historical REST L0)          (L0 → L1 loop)
+        │                   │                           │
+        └─→ MARKET_L0_BUCKET ←┘                         └─→ MARKET_L1_BUCKET
+            (raw_market_event,                            (normalized_market_slice,
+             source_health,                                l1_index, manifest)
+             symbol_health,
+             gap_alert,
+             manifest)
 ```
 
-The app is intentionally stateless at the compute layer. ECS task replacement,
-Fargate Spot interruption, or deploy restart must be safe because progress is
-derived from S3 markers and L1 success pointers, not from local process memory.
-The local filesystem is only an in-task hot spool.
+**Production runtime triggers**:
 
-The production container entrypoint is `crypto-market-ingest-supervisor`. One
-ECS service runs one task and the supervisor starts three internal workers:
+```text
+task start              → realtime + bootstrap scheduler 시작
+realtime worker exit    → supervisor가 ECS 재시작 유도 (non-zero exit)
+normalize worker exit   → supervisor가 bounded delay 후 재기동
+bootstrap L0 success    → success.json marker
+bootstrap L1 success    → complete.json marker → 다음 청크
+bootstrap 전체 완료     → long-lived normalize worker 시작
+SIGTERM                 → graceful shutdown (모든 buffer flush + manifest upload)
+```
 
-- `market-ingest-app`: realtime WebSocket L0 writer.
-- `market-backfill`: Binance historical L0 bootstrap scheduler.
-- `market-normalize`: L0-to-L1 normalization loop.
-
-Default production behavior is automatic. On task start, realtime Binance L0
-ingest begins immediately and Binance historical bootstrap fills the missing
-210-day L0 range in stable UTC-day chunks. Long-lived L1 normalization is
-deferred while bootstrap is incomplete; the supervisor runs one-shot 15-minute
-L1 normalize subchunks after each L0 bootstrap chunk, then starts the long-lived
-normalize worker after all bootstrap chunks are complete.
-
-Bootstrap markers are written under the L1 bucket:
+Bootstrap marker는 L1 bucket에 저장된다.
 
 ```text
 supervisor/bootstrap/venue=binance/start_ms={start_ms}/end_ms={end_ms}/success.json
 supervisor/bootstrap/venue=binance/start_ms={start_ms}/end_ms={end_ms}/complete.json
 ```
 
-`success.json` means the L0 backfill chunk completed. `complete.json` means the
-same chunk has completed both L0 backfill and L1 normalization. `complete.json`
-is the idempotency contract used to skip completed bootstrap chunks after task
-restart. If a task stops mid-chunk, the missing L0 or L1 segment is retried on
-the next task start instead of mutating partial files in place.
+`complete.json`이 idempotency contract다. 청크 도중 task가 죽으면 다음 task 시작 시 누락분만 재시도한다. 부분 파일을 그 자리에서 mutate하지 않는다.
 
-This app only reads public market streams:
+---
 
-- Binance reference truth
-  - `trade`
-  - `bookTicker`
-  - `ticker`
-  - `depth@100ms`
-- Upbit execution truth
-  - `ticker`
-  - `trade`
-  - `orderbook`
-  - `book_ticker` is derived later from the first orderbook unit; L0 stores the
-    original orderbook payload once.
+## Workers
 
-Binance fetches REST order book snapshots from `/api/v3/depth` to align diff depth
-updates into local order books. Upbit derives Top50 KRW symbols from `/v1/market/all`
-and `/v1/ticker/all?quote_currencies=KRW`, then receives all Top50 symbols in one
-public WebSocket subscription.
+### Worker 1: `market-ingest-app` — realtime L0
 
-Binance Top50 uses the checked-in
-`/opt/nangman-crypto/strategies/crypto/rust-engine/config/universe.major-50.toml`
-receive universe. It is generated from Binance public `/api/v3/exchangeInfo` and
-`/api/v3/ticker/24hr` data by selecting USDT spot symbols with
-`status=TRADING` and `isSpotTradingAllowed=true`, sorting by 24h `quoteVolume`
-descending, and taking the first 50. Binance does not expose a separate warning
-flag in this public symbol response; warning/monitoring-tag symbols must be
-manually disabled in the universe file when needed.
+Binance reference + Upbit execution public stream을 in-process로 24x7 수집한다.
 
-It does not use private APIs, credentials, AI hot-path decisions, order placement, or live trading.
+**입력 stream**:
 
-## Runtime triggers
+| venue   | role      | streams |
+|---------|-----------|---------|
+| Binance | reference | `trade`, `bookTicker`, `ticker`, `depth@100ms` |
+| Upbit   | execution | `ticker`, `trade`, `orderbook` |
 
-- Task start: supervisor starts realtime L0 and the bootstrap scheduler.
-- Realtime worker exit: supervisor exits non-zero so ECS restarts the task.
-- Normalize worker exit: supervisor restarts only the normalize worker after a
-  bounded delay.
-- Bootstrap enabled: supervisor defers the long-lived normalize worker until
-  bootstrap completes, avoiding concurrent normalizers in one task.
-- Bootstrap L0 success: supervisor writes `success.json`.
-- Bootstrap L1 success: supervisor writes `complete.json` and moves to the next
-  missing chunk after `--bootstrap-interval-secs`.
-- Bootstrap failure: supervisor leaves the relevant marker absent, waits, and
-  retries the same missing work later.
-- SIGTERM: supervisor stops children and exits cleanly.
+- Binance: REST `/api/v3/depth` snapshot으로 diff depth를 정렬한다.
+- Upbit: Top50 KRW 심볼을 `/v1/market/all` + `/v1/ticker/all?quote_currencies=KRW`에서 도출 후 단일 WS 구독.
+- Upbit `book_ticker`는 L0에 저장하지 않고 L1에서 `orderbook_units[0]`로 파생한다.
+- Binance Top50 universe는 checked-in `config/universe.major-50.toml`.
 
-The default L0 app-owned retention is 45 days. The default L1 app-owned
-retention is 240 days. S3 lifecycle remains a secondary cleanup guard, not the
-primary data-management owner.
+**Resilience (운영 모드)**:
 
-## ECS Operations
+```text
+in-process WS reconnect:
+  initial_backoff       = 1s
+  max_backoff           = 60s
+  multiplier            = 2
+  stale_message_timeout = 30s   (전체 venue 침묵 기준)
+  max_consecutive_failures = 무한 (process exit 하지 않음)
 
-Production deploys should keep the app as one ECS service. Do not split
-realtime, backfill, and normalize into separate ECS services unless the
-supervisor contract is intentionally replaced.
-
-Recommended dev shape:
-
-- Capacity provider: `FARGATE_SPOT` with `weight=1`, `base=0`.
-- Runtime platform: `LINUX/ARM64`.
-- Task size: start with `2 vCPU / 4 GB` while 210-day bootstrap is running.
-- CloudWatch log retention: 3 days.
-- ECR lifecycle: retain the latest 5 pushed images.
-- Container image: distroless runtime, non-root user.
-
-Useful read-only checks:
-
-```bash
-aws ecs describe-services \
-  --profile AdministratorAccess-791444962214 \
-  --region ap-northeast-2 \
-  --cluster ecs-nangman-dev-invest-apn2 \
-  --services svc-nangman-dev-crypto-market-ingest \
-  --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount,capacityProviderStrategy:capacityProviderStrategy,rollout:deployments[0].rolloutState,taskDefinition:taskDefinition}'
+depth book buffered_events 상한:
+  symbol당 최대 1_000개. 초과 시 silent drop 금지.
+  book reset + gap_alert(gap_type="buffered_overflow", heal_status="dropped_count={N}")
+  + source_health.buffer_overflow_count++
 ```
 
-```bash
-aws logs filter-log-events \
-  --profile AdministratorAccess-791444962214 \
-  --region ap-northeast-2 \
-  --log-group-name /ecs/nangman/dev/crypto-market-ingest \
-  --filter-pattern 'market_backfill_done || market_normalize_finished || crypto_market_ingest_bootstrap_chunk_done || error || panic || SIGKILL || OutOfMemory'
+매 재연결마다 `gap_alert(gap_type="ws_reconnect")` 1회와 `source_health.reconnect_count++`로 표면화한다. 재연결 후 sequence tracker / depth book / `last_update_id`는 reset되고, 다음 depth_delta 수신 시 새 REST snapshot이 자동 fetch된다.
+
+**In-memory order book 표현**:
+
+- L0 storage(`payload_json`)는 raw string 그대로 유지한다.
+- in-process book의 `bids` / `asks`는 `BTreeMap<FixedDecimal, FixedDecimal>` (가격 → 수량).
+- 가격 정렬은 lexicographic이 아닌 numeric. `tests/fixtures/binance_depth_delta/sample.parquet` golden fixture가 round-trip을 CI에서 검증한다.
+
+### Worker 2: `market-backfill` — historical L0
+
+`/api/v3/aggTrades` (Binance) 또는 recent trade history (Upbit)로 missing window를 채운다. L0만 쓰며 L1은 건드리지 않는다. supervisor가 210일 lookback을 UTC-day 청크로 자동 호출한다.
+
+### Worker 3: `market-normalize` — L0 → L1
+
+L0 Parquet을 읽어 1초 단위 `normalized_market_slice_v1`을 만들고, 다음을 publish한다.
+
+- `normalization_report_v1`
+- `l1_manifest_v1`
+- 성공 시에만 1초 윈도우당 1개씩 `l1_index` pointer
+- `symbol_universe_bootstrap_rollup`, `symbol_universe_snapshot`
+
+운영 모드는 `--schedule-interval-ms`마다 15분 윈도우를 연속 처리한다. 결정 트리거:
+
+```text
+LIVE     - 최신 ready 윈도우 1개 처리
+CATCH-UP - 더 오래된 미처리 윈도우 우선
+BACKFILL - --input-start-ms / --input-end-ms 명시 (one-shot)
+REPAIR   - audit 또는 missing pointer 보강
+REPORT   - 모든 모드에서 manifest/report 출력
 ```
 
-```bash
-aws s3api list-objects-v2 \
-  --profile AdministratorAccess-791444962214 \
-  --region ap-northeast-2 \
-  --bucket nangman-crypto-dev-market-ingest-l1-962214 \
-  --prefix supervisor/bootstrap/ \
-  --query 'sort_by(Contents || `[]`, &LastModified)[-10:].{key:Key,size:Size,lastModified:LastModified}'
+`MARKET_NORMALIZE_MAX_LATENCY_MS`로 valid 이벤트의 `quality_delayed` 컷오프를 조정한다. `--l0-run-key-overlap-ms`(supervisor default 360_000 ms)는 hourly S3 listing 후 사용하는 conservative L0 run-id timestamp 필터다.
+
+**Downstream consumer 규칙**: arbitrary L1 prefix listing 금지. 항상 success pointer 경로로 read.
+
+```text
+l1_index pointer → l1_manifest_v1 → normalization_report_v1 → output_object_keys
 ```
 
-## S3 Prefix Contract
+reader는 `blocked` / `partial` / `failed` run, schema mismatch, time range outside, manifest drift를 거부한다. 기존 객체는 immutable run evidence로 보존. schema/quality rule 변경은 새 success pointer로 표시한다.
 
-L0 stores immutable raw public market truth and run evidence:
+L0 S3가 durable truth source다. local L0 spool은 evictable hot cache. LIVE는 local 우선 + 누락만 S3에서 다운로드(`catchup_tmp_root`). CATCH-UP/BACKFILL은 S3에서 tmp로 stream하고 세션이 끝나면 디렉터리를 제거한다.
+
+---
+
+## Data Contract (요약)
+
+### L0 prefix
 
 ```text
 raw_market_event/venue={venue}/event_type={event_type}/event_date=YYYY-MM-DD/hour=HH/shard=00/run_id={run_id}-part-NNNNNN.parquet
@@ -161,8 +187,7 @@ gap_alert/venue={venue}/gap_type={gap_type}/event_date=YYYY-MM-DD/hour=HH/shard=
 runs/run_id={run_id}/manifest.json
 ```
 
-L1 stores normalized market slices, success-only index pointers, manifests,
-reports, universe bootstrap rollups, and supervisor markers:
+### L1 prefix
 
 ```text
 normalized_market_slice/window_ms=1000/event_date=YYYY-MM-DD/hour=HH/run_id={l1_run_id}-part-NNNNNN.parquet
@@ -173,313 +198,104 @@ symbol_universe_snapshot/bootstrap_rollup/event_date=YYYY-MM-DD/latest.json
 supervisor/bootstrap/venue=binance/start_ms={start_ms}/end_ms={end_ms}/{success,complete}.json
 ```
 
-Consumers must read L1 through the success pointer path:
+### 신규 health signal (A1/A2)
 
 ```text
-l1_index pointer -> l1_manifest_v1 -> normalization_report_v1 -> output_object_keys
+source_health.reconnect_count        : 누적 in-process WS 재연결 횟수
+source_health.last_reconnect_at_ms   : 마지막 재연결 시각 (null = 한 번도 없음)
+source_health.buffer_overflow_count  : depth book buffered_events 상한 초과 누적
+gap_alert.gap_type = ws_reconnect    : 매 재연결 시 1회
+gap_alert.gap_type = buffered_overflow: heal_status="dropped_count={N}"
+gap_alert.gap_type = snapshot_parse_failed: FixedDecimal 변환 실패
 ```
 
-They must not treat arbitrary L1 prefix listing as canonical state.
+전체 schema는 contract 문서 참조.
 
-## Binance
+---
+
+## Running
+
+### ECS production
+
+배포 자체는 IaC pipeline 책임. 운영자는 다음만 알면 된다.
 
 ```bash
-cargo run \
-  --manifest-path /opt/nangman-crypto/apps/market-ingest-app/Cargo.toml \
-  -- \
-  --venue binance \
-  --config /opt/nangman-crypto/strategies/crypto/rust-engine/config \
-  --duration-seconds 15 \
-  --log-interval-seconds 5 \
-  --depth-snapshot-limit 100
+# 서비스 상태
+aws ecs describe-services \
+  --profile AdministratorAccess-791444962214 \
+  --region ap-northeast-2 \
+  --cluster ecs-nangman-dev-invest-apn2 \
+  --services svc-nangman-dev-crypto-market-ingest \
+  --query 'services[0].{desired:desiredCount,running:runningCount,pending:pendingCount,rollout:deployments[0].rolloutState,taskDefinition:taskDefinition}'
+
+# 핵심 이벤트 필터링
+aws logs filter-log-events \
+  --profile AdministratorAccess-791444962214 \
+  --region ap-northeast-2 \
+  --log-group-name /ecs/nangman/dev/crypto-market-ingest \
+  --filter-pattern 'market_backfill_done || market_normalize_finished || crypto_market_ingest_bootstrap_chunk_done || error || panic || SIGKILL || OutOfMemory'
+
+# 가장 최근 bootstrap marker 10개
+aws s3api list-objects-v2 \
+  --profile AdministratorAccess-791444962214 \
+  --region ap-northeast-2 \
+  --bucket nangman-crypto-dev-market-ingest-l1-962214 \
+  --prefix supervisor/bootstrap/ \
+  --query 'sort_by(Contents || `[]`, &LastModified)[-10:].{key:Key,size:Size,lastModified:LastModified}'
 ```
 
-## Binance L0 S3 storage
-
-```bash
-cargo run \
-  --manifest-path /opt/nangman-crypto/apps/market-ingest-app/Cargo.toml \
-  -- \
-  --venue binance \
-  --config /opt/nangman-crypto/strategies/crypto/rust-engine/config \
-  --duration-seconds 15 \
-  --log-interval-seconds 5 \
-  --expect-symbol-count 50 \
-  --allow-partial-symbol-coverage \
-  --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214 \
-  --aws-region ap-northeast-2 \
-  --l0-flush-records 1000
-```
-
-Binance public streams do not guarantee that every subscribed symbol emits within
-a short smoke window. Use `--allow-partial-symbol-coverage` for short storage
-verification runs.
-
-## Upbit
-
-```bash
-cargo run \
-  --manifest-path /opt/nangman-crypto/apps/market-ingest-app/Cargo.toml \
-  -- \
-  --venue upbit \
-  --config /opt/nangman-crypto/strategies/crypto/rust-engine/config \
-  --duration-seconds 15 \
-  --log-interval-seconds 5 \
-  --expect-symbol-count 50 \
-  --upbit-orderbook-unit 5
-```
-
-## Upbit L0 S3 storage
-
-```bash
-cargo run \
-  --manifest-path /opt/nangman-crypto/apps/market-ingest-app/Cargo.toml \
-  -- \
-  --venue upbit \
-  --config /opt/nangman-crypto/strategies/crypto/rust-engine/config \
-  --duration-seconds 15 \
-  --log-interval-seconds 5 \
-  --expect-symbol-count 50 \
-  --upbit-orderbook-unit 5 \
-  --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214 \
-  --aws-region ap-northeast-2 \
-  --l0-flush-records 1000
-```
-
-When `--l0-s3-bucket` is set, the app writes `raw_market_event_v2` Parquet
-objects and a run manifest:
+**권장 task shape (dev)**:
 
 ```text
-raw_market_event/venue=binance/event_type=ticker/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-raw_market_event/venue=binance/event_type=trade/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-raw_market_event/venue=binance/event_type=book_ticker/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-raw_market_event/venue=binance/event_type=depth_delta/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-raw_market_event/venue=binance/event_type=depth_snapshot/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-raw_market_event/venue=upbit/event_type=ticker/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-raw_market_event/venue=upbit/event_type=trade/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-raw_market_event/venue=upbit/event_type=depth_snapshot/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-source_health/venue=binance/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-source_health/venue=upbit/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-symbol_health/venue=binance/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-symbol_health/venue=upbit/event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-gap_alert/venue=binance/gap_type=.../event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-gap_alert/venue=upbit/gap_type=.../event_date=YYYY-MM-DD/hour=HH/shard=00/*.parquet
-runs/run_id=market-ingest-upbit-*/manifest.json
-runs/run_id=market-ingest-binance-*/manifest.json
+capacity:     FARGATE_SPOT (weight=1, base=0)
+platform:     LINUX/ARM64
+size:         2 vCPU / 4 GB  (210일 bootstrap 진행 중일 때)
+log retention: 3 days
+ECR lifecycle: 최신 5개 image 보존
+image:        distroless runtime, non-root
 ```
 
-Parquet files are retained in the local L0 spool as the LIVE L1 input cache.
-S3 upload remains the durable recovery/backfill source. Each S3 `PutObject` uses
-bounded retry with exponential backoff and stable jitter. Upload failure does
-not delete the local parquet file; the failed object is recorded in the run
-report, and the next recovery/backfill pass can retry from local data.
+production은 항상 하나의 ECS service. realtime/backfill/normalize를 별도 service로 쪼개지 말 것 (supervisor contract 침범).
 
-## L1 normalization
+### Local Compose
 
-`market-normalize` is a long-lived worker binary in this app image. In
-production it is started by `crypto-market-ingest-supervisor`; it can still be
-run directly for manual audit and repair. It
-reads L0 objects by operating mode, builds 1-second
-`normalized_market_slice_v1` rows by `exchange_timestamp_ms`, and publishes Parquet data,
-`normalization_report_v1`, `l1_manifest_v1`, and the success-only `l1_index`
-pointer fanout. A successful 15-minute run writes one pointer per 1-second
-window, while each pointer still references the canonical run manifest/report.
-This lets downstream apps recover market context from an arbitrary event
-timestamp without listing L1 prefixes.
+Compose는 local verification harness다. Binance, Upbit, `market-normalize`를 같은 image에서 별도 service로 띄운다. **production은 이 구성을 사용하지 않는다** (all-in-one supervisor 한 컨테이너).
 
-S3 recovery/backfill must discover every raw market event type that contributes
-to L1 projections, including Binance derivatives snapshots
-`funding_rate_snapshot` and `open_interest_snapshot`. If those L0 objects are not
-listed during normalization, `market_feature_delta` cannot contain
-`funding_rate` or `open_interest`, and derivatives candidates remain blocked
-before research.
+Linux checkout: `/home/seongwon/nangman-crypto`. 컨테이너 app root: `/opt/nangman-crypto`. host runtime state(Roles Anywhere helper, PKI, spool)는 `/opt/nangman-crypto`.
 
-Downstream apps must not read L1 Parquet by prefix listing. They must resolve
-the success-only reader path:
+**초기 host setup (host당 1회)**:
 
-```text
-l1_index pointer -> l1_manifest_v1 -> normalization_report_v1 -> output_object_keys
-```
+setup 스크립트는 `/opt` 호스트 디렉터리 준비, IAM Roles Anywhere credential helper 설치, `config.container` 생성, `apps/market-ingest-app/.env` 생성 (`.env.example` 복사)을 수행한다. idempotent.
 
-The reader rejects `blocked`, `partial`, and `failed` runs, schema mismatches,
-requested windows outside the run time range, and report/manifest drift.
-Existing uploaded objects are kept as immutable run evidence; schema or
-quality-rule changes are handled by targeted backfill and a new success pointer,
-not by deleting old objects.
-
-L0 S3 is the durable truth source. The local L0 spool is an evictable hot cache:
-LIVE mode uses local entries first and downloads only missing keys from S3 into
-`catchup_tmp_root`; CATCH-UP and manual BACKFILL stream from S3 into that tmp
-directory and remove the session directory when the run finishes.
-
-Audit L1 index coverage after deployment:
-
-```bash
-cargo run \
-  --manifest-path /home/seongwon/nangman-crypto/apps/market-ingest-app/Cargo.toml \
-  --bin market-normalize -- \
-  --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214 \
-  --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214 \
-  --aws-profile market-ingest-roles-anywhere \
-  --aws-region ap-northeast-2 \
-  --audit-l1-index-start-ms 1778042400000 \
-  --audit-l1-index-end-ms 1778043300000
-```
-
-Default mode is a supervisor-managed worker loop. Every `--schedule-interval-ms`
-tick it processes contiguous 15-minute UTC windows until it is caught up or
-`--max-windows-per-tick` is reached. It never skips intermediate windows:
-if only the latest ready window is pending the current window is LIVE; if older
-windows are still missing it is CATCH-UP. On SIGTERM, the worker finishes the
-current window and exits before starting another window or sleep cycle.
-`MARKET_NORMALIZE_MAX_LATENCY_MS` controls when valid events are counted as
-`quality_delayed` instead of `quality_ok`.
-`--l0-run-key-overlap-ms` controls the conservative L0 run-id timestamp filter
-used after hourly S3 listing. The supervisor default is 360000 ms, separate from
-the realtime worker lifetime, so a long-running task does not force L1 to scan a
-year of L0 run prefixes every tick.
-
-```bash
-sudo docker compose \
-  -f /home/seongwon/nangman-crypto/apps/market-ingest-app/compose.yml \
-  --env-file /home/seongwon/nangman-crypto/apps/market-ingest-app/.env \
-  up -d market-normalize
-```
-
-## L0 historical backfill
-
-`market-backfill` is the L0 historical trade worker in this app image. It writes
-only `raw_market_event_v2`, `source_health_v2`, `symbol_health_v1`,
-`gap_alert_v1`, and the run manifest into the L0 bucket. It does not write L1
-directly.
-
-Binance uses public `/api/v3/aggTrades` to backfill long-range spot trades for
-the checked-in major-50 universe or an explicit `--symbols` subset.
-
-```bash
-cargo run \
-  --manifest-path /home/seongwon/nangman-crypto/apps/market-ingest-app/Cargo.toml \
-  --bin market-backfill \
-  -- \
-  --venue binance \
-  --config /home/seongwon/nangman-crypto/strategies/crypto/rust-engine/config \
-  --input-start-ms 1778042400000 \
-  --input-end-ms 1778043300000 \
-  --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214
-```
-
-Upbit uses public recent trade history only. It is for recent repair/backfill,
-not 210-day full bootstrap, and it rejects ranges outside the recent window.
-
-```bash
-cargo run \
-  --manifest-path /home/seongwon/nangman-crypto/apps/market-ingest-app/Cargo.toml \
-  --bin market-backfill \
-  -- \
-  --venue upbit \
-  --input-start-ms 1778572800000 \
-  --input-end-ms 1778573400000 \
-  --symbols KRW-BTC,KRW-ETH \
-  --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214
-```
-
-Manual backfill pins the exact input range:
-
-```bash
-cargo run \
-  --manifest-path /home/seongwon/nangman-crypto/apps/market-ingest-app/Cargo.toml \
-  --bin market-normalize \
-  -- \
-  --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214 \
-  --l0-local-root /opt/nangman-crypto/data/spool/market-ingest/l0 \
-  --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214 \
-  --catchup-tmp-root /opt/nangman-crypto/data/spool/market-normalize/catchup \
-  --input-start-ms 1778042400000 \
-  --input-end-ms 1778043300000
-```
-
-## L0 DoD
-
-This app is complete for L0 ingest when:
-
-- Binance and Upbit raw public events are written as Parquet.
-- Binance writes REST `/api/v3/depth` snapshots as `depth_snapshot` before WS diff
-  depth deltas are finalized for the run.
-- Each run writes at least one `source_health` object per venue.
-- Each run writes at least one `symbol_health` object per venue.
-- Detected gap alerts are written as `gap_alert` Parquet objects.
-- S3 retry exhaustion count is zero.
-- The run manifest contains uploaded object keys and record counts.
-- `cargo fmt`, `cargo check`, and `cargo test` pass.
-- Every code file stays under 500 lines.
-
-## Docker Compose
-
-The compose unit is a local verification harness and may run Binance, Upbit, and
-`market-normalize` as separate services using the same image. ECS production is
-not split into separate services; it runs the all-in-one supervisor as the only
-container entrypoint.
-
-The Linux checkout path is `/home/seongwon/nangman-crypto`. The container app
-root remains `/opt/nangman-crypto`, and host-local runtime state such as
-Roles Anywhere helper files, PKI material, and spool data also stays under
-`/opt/nangman-crypto`.
-
-### Initial host setup (once per host)
-
-The setup script prepares `/opt` host directories, installs the IAM Roles
-Anywhere credential helper, creates `config.container`, and creates the
-checkout-local `apps/market-ingest-app/.env` file from `.env.example`. It is
-idempotent and should be run on each on-prem Linux host.
-
-The workload certificate and private key are not generated by this script. They
-must come from the signing host and live under the host PKI directory:
+PKI material은 별도. 서명 호스트에서 받아 다음 경로에 둔다.
 
 ```text
 /opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.791444962214.dev.pem
 /opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.791444962214.dev.key
 ```
 
-Use scp from the signing host, then rerun setup if the first run stopped with
-exit code 2:
-
 ```bash
 scp signing-host:/secure/path/nangman-crypto-market-ingest.791444962214.dev.pem \
   /opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.791444962214.dev.pem
 scp signing-host:/secure/path/nangman-crypto-market-ingest.791444962214.dev.key \
   /opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.791444962214.dev.key
-```
 
-```bash
 cd /home/seongwon/nangman-crypto/apps/market-ingest-app
 ./scripts/setup-host.sh
 ```
 
-### Redeploy (after git pull)
+setup이 exit 2로 멈추면 PKI 배치 후 재실행.
 
-After pulling new code, rebuild, run preflight, and recreate all compose
-services with:
+**Redeploy (git pull 후)**:
 
 ```bash
 cd /home/seongwon/nangman-crypto/apps/market-ingest-app
 ./scripts/deploy.sh
 ```
 
-The deploy script verifies host clock sync, runs `docker compose config`,
-builds the image, runs container-side AWS/S3 preflight with the same mounted
-`AWS_CONFIG_FILE` and `AWS_PROFILE` that runtime uses, recreates Binance,
-Upbit, and `market-normalize`, and prints service status with the checkout-local
-`.env` and compose file paths.
+deploy.sh는 host clock sync(`timedatectl NTPSynchronized=yes`) 검증, `docker compose config` 검증, image build, container-side AWS/S3 preflight, Binance·Upbit·normalize service 재기동, 상태 출력을 한 번에 한다. NTP unsync면 watermark 결정이 흔들리므로 service 시작을 막는다.
 
-The AWS profile itself is created on the deployment host. `deploy.sh` only
-checks that the configured runtime profile can list both buckets and
-write/read/delete a `_preflight/market-ingest-app/...` smoke object in both
-buckets. If `timedatectl` reports `NTPSynchronized=no`, deploy stops before
-starting services because watermark decisions depend on host wall-clock time.
-
-### Manual stop
-
-Stop it with:
+**수동 stop**:
 
 ```bash
 sudo docker compose \
@@ -488,108 +304,225 @@ sudo docker compose \
   down
 ```
 
-## Structured Logs
+**Normalize만 띄우기**:
 
-The app writes JSON Lines to stdout/stderr with schema
-`market_ingest_log_v1`. Production compose defaults to
-`MARKET_INGEST_LOG_LEVEL=info`.
+```bash
+sudo docker compose \
+  -f /home/seongwon/nangman-crypto/apps/market-ingest-app/compose.yml \
+  --env-file /home/seongwon/nangman-crypto/apps/market-ingest-app/.env \
+  up -d market-normalize
+```
 
-Log levels:
+### Manual smoke / audit
 
-- `error`: unrecoverable process failure.
-- `warn`: degraded operation or operator action needed.
-- `info`: lifecycle, reports, and successful publish summaries.
-- `debug`: high-frequency progress, heartbeats, not-ready polling, and per-window start details.
+`cargo run`으로 직접 워커를 띄우는 절차. 운영에는 사용하지 않고 short smoke 검증·debug·audit에만 쓴다.
 
-Events:
+```bash
+# 공통 prefix
+ROOT=/opt/nangman-crypto/apps/market-ingest-app
+CFG=/opt/nangman-crypto/strategies/crypto/rust-engine/config
+BUCKET=nangman-crypto-dev-market-ingest-l0-962214
+```
+
+**realtime smoke (in-memory only)**:
+
+```bash
+cargo run --manifest-path $ROOT/Cargo.toml -- \
+  --venue binance \
+  --config $CFG \
+  --duration-seconds 15 \
+  --log-interval-seconds 5 \
+  --depth-snapshot-limit 100
+```
+
+`--venue upbit`로 venue 전환. Upbit는 `--upbit-orderbook-unit 5` 추가.
+
+**realtime smoke + L0 S3 storage**:
+
+```bash
+cargo run --manifest-path $ROOT/Cargo.toml -- \
+  --venue binance \
+  --config $CFG \
+  --duration-seconds 15 \
+  --log-interval-seconds 5 \
+  --expect-symbol-count 50 \
+  --allow-partial-symbol-coverage \
+  --l0-s3-bucket $BUCKET \
+  --aws-region ap-northeast-2 \
+  --l0-flush-records 1000
+```
+
+Binance public stream은 짧은 smoke 윈도우 안에서 모든 구독 심볼이 발화한다는 보장이 없다. 짧은 storage 검증에는 `--allow-partial-symbol-coverage`를 사용한다.
+
+**historical backfill (one-shot)**:
+
+```bash
+cargo run --manifest-path $ROOT/Cargo.toml --bin market-backfill -- \
+  --venue binance \
+  --config $CFG \
+  --input-start-ms 1778042400000 \
+  --input-end-ms 1778043300000 \
+  --l0-s3-bucket $BUCKET
+```
+
+Upbit backfill은 recent trade history만 지원하며 `--symbols KRW-BTC,KRW-ETH` 같이 명시. 오래된 범위는 거부한다.
+
+**manual normalize (one-shot)**:
+
+```bash
+cargo run --manifest-path $ROOT/Cargo.toml --bin market-normalize -- \
+  --l0-s3-bucket $BUCKET \
+  --l0-local-root /opt/nangman-crypto/data/spool/market-ingest/l0 \
+  --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214 \
+  --catchup-tmp-root /opt/nangman-crypto/data/spool/market-normalize/catchup \
+  --input-start-ms 1778042400000 \
+  --input-end-ms 1778043300000
+```
+
+**L1 index coverage audit**:
+
+```bash
+cargo run --manifest-path $ROOT/Cargo.toml --bin market-normalize -- \
+  --l0-s3-bucket $BUCKET \
+  --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214 \
+  --aws-profile market-ingest-roles-anywhere \
+  --aws-region ap-northeast-2 \
+  --audit-l1-index-start-ms 1778042400000 \
+  --audit-l1-index-end-ms 1778043300000
+```
+
+---
+
+## Monitoring
+
+### Structured logs
+
+```text
+schema: market_ingest_log_v1
+format: JSON Lines (stdout=info+, stderr=warn/error)
+common fields: app, level, event, timestamp_ms, fields
+default level: MARKET_INGEST_LOG_LEVEL=info
+```
+
+Level별 의미:
+
+```text
+error - 복구 불가, process 종료 가능
+warn  - degraded 또는 운영자 조치 필요
+info  - lifecycle, report, 성공 publish 요약
+debug - 고빈도 progress, heartbeat, not-ready polling, 윈도우별 시작
+```
+
+**Lifecycle events (info)**:
 
 - `crypto_market_ingest_supervisor_start`
 - `crypto_market_ingest_normalize_deferred`
-- `crypto_market_ingest_bootstrap_chunk_start`
-- `crypto_market_ingest_bootstrap_l0_done`
-- `crypto_market_ingest_bootstrap_l1_done`
-- `crypto_market_ingest_bootstrap_chunk_done`
-- `crypto_market_ingest_bootstrap_complete`
+- `crypto_market_ingest_bootstrap_chunk_start` / `_l0_done` / `_l1_done` / `_chunk_done` / `_complete`
 - `crypto_market_ingest_s3_retention_run`
-- `market_ingest_start`
-- `market_ingest_report`
+- `market_ingest_start` / `market_ingest_report`
 - `market_ingest_eviction_run`
-- `market_backfill_done`
-- `market_backfill_s3_retention_run`
-- `market_normalize_preflight_ok`
-- `market_normalize_worker_started`
-- `market_normalize_worker_stopped`
-- `market_normalize_index_published`
-- `market_normalize_l1_index_audit`
-- `market_normalize_finished`
-- `market_normalize_s3_retention_run`
+- `market_backfill_done` / `market_backfill_s3_retention_run`
+- `market_normalize_preflight_ok` / `market_normalize_worker_started` / `market_normalize_worker_stopped`
+- `market_normalize_index_published` / `market_normalize_l1_index_audit`
+- `market_normalize_finished` / `market_normalize_s3_retention_run`
 - `market_normalize_fallback_alert`
-- `market_ingest_error`
 
-Debug-only events in the default production image:
+**Errors (stderr)**:
+
+- `market_ingest_error`
+- `market_normalize_error`
+- `market_backfill_error`
+- `crypto_market_ingest_supervisor_error`
+
+**Debug-only**:
 
 - `market_ingest_progress`
-- `market_ingest_unsealed_orphan_cleanup` when no invalid orphan is found
+- `market_ingest_unsealed_orphan_cleanup` (invalid orphan 없을 때)
 - `market_ingest_eviction_heartbeat`
-- `market_normalize_started`
-- `market_normalize_not_ready`
-- `market_normalize_worker_sleep`
+- `market_normalize_started` / `_not_ready` / `_worker_sleep`
 
-Example:
+**예시**:
 
 ```json
 {"schema_version":"market_ingest_log_v1","app":"market-ingest-app","level":"info","event":"market_normalize_finished","timestamp_ms":1777976991000,"fields":{"l1_run_id":"l1_1777975200000_1777976100000_1777976991000","status":"success","slice_count_total":90000,"output_object_count":2}}
 ```
 
-Follow logs on Linux:
+**유용한 명령어**:
 
 ```bash
-sudo docker compose \
-  -f /home/seongwon/nangman-crypto/apps/market-ingest-app/compose.yml \
-  --env-file /home/seongwon/nangman-crypto/apps/market-ingest-app/.env \
-  logs -f --no-log-prefix
-```
+# follow
+sudo docker compose -f $ROOT/compose.yml --env-file $ROOT/.env logs -f --no-log-prefix
 
-Filter only structured ingest logs:
+# 구조 로그만
+sudo docker compose -f $ROOT/compose.yml --env-file $ROOT/.env logs --no-log-prefix \
+  | jq -c 'select(.schema_version == "market_ingest_log_v1")'
 
-```bash
-sudo docker compose \
-  -f /home/seongwon/nangman-crypto/apps/market-ingest-app/compose.yml \
-  --env-file /home/seongwon/nangman-crypto/apps/market-ingest-app/.env \
-  logs --no-log-prefix | jq -c 'select(.schema_version == "market_ingest_log_v1")'
-```
-
-Temporarily enable verbose operational diagnostics:
-
-```bash
+# verbose 일시 활성화
 sudo env MARKET_INGEST_LOG_LEVEL=debug docker compose \
-  -f /home/seongwon/nangman-crypto/apps/market-ingest-app/compose.yml \
-  --env-file /home/seongwon/nangman-crypto/apps/market-ingest-app/.env \
+  -f $ROOT/compose.yml --env-file $ROOT/.env \
   up -d --force-recreate
 ```
 
-Container DoD:
+### Health signals 모니터링
 
-- `docker compose config` renders without errors.
-- `MARKET_INGEST_REPO_ROOT` in `/home/seongwon/nangman-crypto/apps/market-ingest-app/.env`
-  points to the actual clone path on the host.
-- Both `binance` and `upbit` services start from compose.
-- IAM Roles Anywhere config and certificate material are mounted read-only from ignored app infra.
-- Local L0 data is retained under `/opt/nangman-crypto/data/spool/market-ingest/l0`
-  as the LIVE L1 input cache. S3 is the recovery/backfill truth source, and
-  fallback downloads go to `/opt/nangman-crypto/data/spool/market-normalize/catchup`.
-- S3 output goes to `nangman-crypto-dev-market-ingest-l0-962214` unless `MARKET_L0_BUCKET` is overridden.
-- L1 normalize output goes to `nangman-crypto-dev-market-ingest-l1-962214`
-  unless `MARKET_L1_BUCKET` is overridden.
-- S3 retention is app-owned: L0 defaults to 45 days, L1 defaults to 240 days,
-  and the shared cleanup loop checks every 6 hours. Bucket lifecycle is only the
-  fallback safety net: L0 expires after 60 days, L1 expires after 300 days, and
-  `normalized_market_slice/` transitions to Standard-IA after 30 days.
-- L1 universe bootstrap writes and reads
-  `symbol_universe_snapshot/bootstrap_rollup/*`; this existing universe prefix is
-  required for 30-day point-in-time universe approval.
-- The runtime role can `ListBucket`, `GetObject`, and `PutObject` on the L0/L1
-  buckets, and can `DeleteObject` for `_preflight/market-ingest-app/*` plus the
-  app-owned market-ingest retention prefixes.
-- If L0/L1 buckets use SSE-KMS, the runtime role also needs the matching KMS
-  `GenerateDataKey` and `Decrypt` permissions.
+운영에서 주기적으로 봐야 할 핵심 지표.
+
+```text
+source_health.reconnect_count        - 0에 가깝게 유지. spike는 WS 인프라 이슈.
+source_health.buffer_overflow_count  - 0에 가깝게 유지. spike는 snapshot 경로 장애.
+gap_alert(gap_type=ws_reconnect)     - heal_status에서 원인 분류 (stale_timeout 등)
+gap_alert(gap_type=buffered_overflow) - dropped_count={N}으로 손실 규모 확인
+gap_alert(gap_type=depth_update_id_gap) - Binance depth sequence 단절
+market_ingest_progress.health        - degraded/critical 지속 여부
+```
+
+---
+
+## DoD
+
+### L0 ingest DoD
+
+- Binance와 Upbit 모두 public market stream만 사용.
+- private API, account credential, order placement, live trading 경로 없음.
+- Binance는 `reference`, Upbit는 `execution`으로 저장.
+- `raw_market_event_v2` Parquet이 L0 bucket에 저장됨.
+- `source_health_v2`가 run당 venue별 최소 1개.
+- `symbol_health_v1`가 run당 venue별 최소 1개.
+- gap이 감지되면 `gap_alert_v1`이 별도 prefix에 저장됨.
+- `runs/run_id={run_id}/manifest.json`에 업로드된 객체 키와 record count 포함.
+- 모든 객체가 `event_date`, `hour`, `shard` partition을 가짐.
+- run 종료 전 모든 buffer flush.
+- `cargo fmt`, `cargo check`, `cargo test` 통과.
+- short smoke에서 S3 listing으로 `raw_market_event`, `source_health`, `symbol_health`, `manifest` 존재 확인.
+- 비활성 심볼 때문에 coverage 부족 가능성이 있는 venue는 `allow_partial_symbol_coverage` 명시.
+
+### 운영 모드 DoD (추가)
+
+- 무기한 실행 모드 존재.
+- in-process WS reconnect (initial=1s, max=60s, mult=2, stale_timeout=30s, max_failures=무한).
+- 매 reconnect마다 `gap_alert(ws_reconnect)` + `source_health.reconnect_count++`.
+- depth book buffered_events 상한 1_000. silent drop 금지. 초과 시 `gap_alert(buffered_overflow)` + `source_health.buffer_overflow_count++`.
+- Binance in-memory order book은 `BTreeMap<FixedDecimal, FixedDecimal>`. golden fixture round-trip 테스트가 CI에서 통과.
+- 종료 신호 수신 시 graceful shutdown으로 buffer flush + manifest upload 보장.
+- S3 upload 지연 시 bounded buffer/backpressure 정책 명확.
+- 장시간 run에서 `source_health` 주기 저장.
+
+### Container DoD
+
+- `docker compose config` 무오류 렌더링.
+- `MARKET_INGEST_REPO_ROOT`가 실제 host clone 경로를 가리킴.
+- Binance와 Upbit service 모두 compose에서 시작.
+- IAM Roles Anywhere config와 PKI material은 ignored app infra에서 read-only mount.
+- local L0 데이터는 `/opt/nangman-crypto/data/spool/market-ingest/l0`에 LIVE L1 input cache로 보존.
+- fallback 다운로드는 `/opt/nangman-crypto/data/spool/market-normalize/catchup`.
+- L0 S3 출력은 `nangman-crypto-dev-market-ingest-l0-962214` (override: `MARKET_L0_BUCKET`).
+- L1 normalize 출력은 `nangman-crypto-dev-market-ingest-l1-962214` (override: `MARKET_L1_BUCKET`).
+- app-owned retention: L0 = 45일, L1 = 240일, cleanup loop 주기 = 6시간.
+- bucket lifecycle은 fallback safety net: L0 = 60일, L1 = 300일, `normalized_market_slice/` = 30일 후 Standard-IA.
+- L1 universe bootstrap이 `symbol_universe_snapshot/bootstrap_rollup/*` 쓰고 읽음 (30-day point-in-time universe approval).
+- 런타임 role: L0/L1 bucket에 `ListBucket`, `GetObject`, `PutObject`, `_preflight/market-ingest-app/*`와 retention prefix에는 `DeleteObject`.
+- SSE-KMS 사용 시 매칭 KMS `GenerateDataKey`, `Decrypt` 권한.
+
+---
+
+_Last updated: 2026-05-20 KST (A1/A2/B3 reflected)_

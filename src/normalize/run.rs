@@ -1,15 +1,16 @@
-use super::args::{InputRange, NormalizeArgs, unix_timestamp_millis};
+use super::args::{InputRange, NormalizeArgs};
 use super::discovery::{resolve_last_l1_success_end_ms, resolve_oldest_l0_object_ms};
 use super::mode::{RunDecision, decide_live_priority_mode, decide_mode};
 use super::publish::publish_outputs;
 use super::read::{cleanup_session_tmp, read_and_build_slices};
 use super::write::index_pointer_key;
+use crate::clock;
 use crate::log_stream;
 use crate::shutdown::ShutdownListener;
 use crate::storage::s3_upload::S3Uploader;
 use crate::storage::{
-    S3RetentionLoopEvents, abort_s3_retention_handles, l0_s3_retention_config,
-    l1_s3_retention_config, spawn_s3_retention_loop,
+    DualBucketRetention, S3RetentionLoopEvents, abort_s3_retention_handles,
+    spawn_l0_l1_retention_loops,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -67,7 +68,7 @@ async fn drain_ready_windows(
         processed_windows += 1;
         live_priority_completed_range = Some(completed_range);
         oldest_l0_object_ms = None;
-        now_ms = unix_timestamp_millis();
+        now_ms = clock::now_ms();
     }
 
     loop {
@@ -119,7 +120,7 @@ async fn drain_ready_windows(
             )?;
             return Ok(());
         }
-        now_ms = unix_timestamp_millis();
+        now_ms = clock::now_ms();
     }
 }
 
@@ -285,7 +286,7 @@ async fn run_normalize_worker(
             abort_s3_retention_handles(retention_handles.take().unwrap_or_default()).await;
             return Ok(());
         }
-        now_ms = unix_timestamp_millis();
+        now_ms = clock::now_ms();
     }
 }
 
@@ -293,42 +294,20 @@ fn spawn_s3_retention_loops(args: &NormalizeArgs) -> Vec<JoinHandle<()>> {
     if !args.s3_retention_enabled {
         return Vec::new();
     }
-    let interval_secs = args.s3_retention_check_interval_secs;
-    [
-        (
-            "l0",
-            l0_s3_retention_config(
-                args.l0_s3_bucket.clone(),
-                args.aws_region.clone(),
-                args.aws_profile.clone(),
-                args.l0_s3_retention_days,
-                args.s3_retention_max_deletes_per_run,
-            ),
-        ),
-        (
-            "l1",
-            l1_s3_retention_config(
-                args.l1_s3_bucket.clone(),
-                args.aws_region.clone(),
-                args.aws_profile.clone(),
-                args.l1_s3_retention_days,
-                args.s3_retention_max_deletes_per_run,
-            ),
-        ),
-    ]
-    .into_iter()
-    .map(|(layer, config)| {
-        spawn_s3_retention_loop(
-            layer,
-            config,
-            interval_secs,
-            S3RetentionLoopEvents {
-                run_event: "market_normalize_s3_retention_run",
-                error_event: "market_normalize_s3_retention_error",
-            },
-        )
+    spawn_l0_l1_retention_loops(DualBucketRetention {
+        l0_bucket: args.l0_s3_bucket.clone(),
+        l1_bucket: args.l1_s3_bucket.clone(),
+        aws_region: args.aws_region.clone(),
+        aws_profile: args.aws_profile.clone(),
+        l0_retention_days: args.l0_s3_retention_days,
+        l1_retention_days: args.l1_s3_retention_days,
+        max_deletes_per_run: args.s3_retention_max_deletes_per_run,
+        interval_secs: args.s3_retention_check_interval_secs,
+        events: S3RetentionLoopEvents {
+            run_event: "market_normalize_s3_retention_run",
+            error_event: "market_normalize_s3_retention_error",
+        },
     })
-    .collect()
 }
 
 struct ShutdownHandle {

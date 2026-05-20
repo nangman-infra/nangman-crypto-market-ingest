@@ -1,6 +1,6 @@
 use super::events::{UpbitOrderbookMessage, UpbitParsedEvent, UpbitTradeMessage};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 const MAX_STORED_GAP_ALERTS: usize = 1_000;
 const MAX_RECENT_GAP_ALERTS: usize = 20;
@@ -26,15 +26,17 @@ pub struct UpbitIngestWatchStats {
     pub sequence_anomalies: u64,
     pub source_health_status: String,
     pub source_health_events: u64,
+    pub reconnect_count: u64,
+    pub last_reconnect_at_ms: Option<i64>,
     pub gap_alert_count: u64,
-    pub recent_gap_alerts: Vec<UpbitGapAlert>,
+    pub recent_gap_alerts: VecDeque<UpbitGapAlert>,
     pub last_exchange_timestamp_ms: Option<i64>,
     pub last_ingest_timestamp_ms: Option<i64>,
     pub latest_stream_lag_ms: i64,
     pub symbol_last_event_time_ms: BTreeMap<String, i64>,
     pub symbol_last_ingest_time_ms: BTreeMap<String, i64>,
     #[serde(skip)]
-    pub gap_alerts: Vec<UpbitGapAlert>,
+    pub gap_alerts: VecDeque<UpbitGapAlert>,
     pub last_best_quotes: BTreeMap<String, UpbitBestQuote>,
     #[serde(skip)]
     last_trade_sequence_by_symbol: BTreeMap<String, i64>,
@@ -86,14 +88,16 @@ impl UpbitIngestWatchStats {
             sequence_anomalies: 0,
             source_health_status: "connected".to_owned(),
             source_health_events: 1,
+            reconnect_count: 0,
+            last_reconnect_at_ms: None,
             gap_alert_count: 0,
-            recent_gap_alerts: Vec::new(),
+            recent_gap_alerts: VecDeque::new(),
             last_exchange_timestamp_ms: None,
             last_ingest_timestamp_ms: None,
             latest_stream_lag_ms: 0,
             symbol_last_event_time_ms: BTreeMap::new(),
             symbol_last_ingest_time_ms: BTreeMap::new(),
-            gap_alerts: Vec::new(),
+            gap_alerts: VecDeque::new(),
             last_best_quotes: BTreeMap::new(),
             last_trade_sequence_by_symbol: BTreeMap::new(),
             last_orderbook_timestamp_by_symbol: BTreeMap::new(),
@@ -197,15 +201,15 @@ impl UpbitIngestWatchStats {
         }
     }
 
-    fn record_gap_alert(&mut self, alert: UpbitGapAlert) {
+    pub(super) fn record_gap_alert(&mut self, alert: UpbitGapAlert) {
         self.gap_alert_count += 1;
-        self.gap_alerts.push(alert.clone());
+        self.gap_alerts.push_back(alert.clone());
         if self.gap_alerts.len() > MAX_STORED_GAP_ALERTS {
-            self.gap_alerts.remove(0);
+            self.gap_alerts.pop_front();
         }
-        self.recent_gap_alerts.push(alert);
+        self.recent_gap_alerts.push_back(alert);
         if self.recent_gap_alerts.len() > MAX_RECENT_GAP_ALERTS {
-            self.recent_gap_alerts.remove(0);
+            self.recent_gap_alerts.pop_front();
         }
     }
 

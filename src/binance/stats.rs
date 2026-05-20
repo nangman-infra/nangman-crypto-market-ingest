@@ -1,6 +1,6 @@
 use super::events::{BinanceParsedEnvelope, BinanceParsedEvent};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 const MAX_STORED_GAP_ALERTS: usize = 1_000;
 const MAX_RECENT_GAP_ALERTS: usize = 20;
@@ -26,10 +26,12 @@ pub struct BinanceL0WatchStats {
     pub sequence_anomalies: u64,
     pub source_health_status: String,
     pub source_health_events: u64,
+    pub reconnect_count: u64,
+    pub last_reconnect_at_ms: Option<i64>,
     pub gap_alert_count: u64,
-    pub recent_gap_alerts: Vec<BinanceL0GapAlert>,
+    pub recent_gap_alerts: VecDeque<BinanceL0GapAlert>,
     #[serde(skip)]
-    pub gap_alerts: Vec<BinanceL0GapAlert>,
+    pub gap_alerts: VecDeque<BinanceL0GapAlert>,
     pub last_exchange_timestamp_ms: Option<i64>,
     pub last_ingest_timestamp_ms: Option<i64>,
     pub latest_stream_lag_ms: i64,
@@ -74,9 +76,11 @@ impl BinanceL0WatchStats {
             sequence_anomalies: 0,
             source_health_status: "connected".to_owned(),
             source_health_events: 1,
+            reconnect_count: 0,
+            last_reconnect_at_ms: None,
             gap_alert_count: 0,
-            recent_gap_alerts: Vec::new(),
-            gap_alerts: Vec::new(),
+            recent_gap_alerts: VecDeque::new(),
+            gap_alerts: VecDeque::new(),
             last_exchange_timestamp_ms: None,
             last_ingest_timestamp_ms: None,
             latest_stream_lag_ms: 0,
@@ -205,15 +209,15 @@ impl BinanceL0WatchStats {
         }
     }
 
-    fn record_gap_alert(&mut self, alert: BinanceL0GapAlert) {
+    pub(super) fn record_gap_alert(&mut self, alert: BinanceL0GapAlert) {
         self.gap_alert_count += 1;
-        self.gap_alerts.push(alert.clone());
+        self.gap_alerts.push_back(alert.clone());
         if self.gap_alerts.len() > MAX_STORED_GAP_ALERTS {
-            self.gap_alerts.remove(0);
+            self.gap_alerts.pop_front();
         }
-        self.recent_gap_alerts.push(alert);
+        self.recent_gap_alerts.push_back(alert);
         if self.recent_gap_alerts.len() > MAX_RECENT_GAP_ALERTS {
-            self.recent_gap_alerts.remove(0);
+            self.recent_gap_alerts.pop_front();
         }
     }
 }
@@ -224,13 +228,13 @@ mod tests {
     use crate::binance::events::{
         BinanceDiffDepthMessage, BinanceParsedEnvelope, BinanceParsedEvent,
     };
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::clock;
 
     #[test]
     fn records_depth_update_id_gap_alert() {
         let mut stats = BinanceL0WatchStats::new("wss://example.test".to_owned(), 1);
-        stats.record_event(depth_envelope(41, 42), unix_timestamp_ms());
-        stats.record_event(depth_envelope(44, 45), unix_timestamp_ms());
+        stats.record_event(depth_envelope(41, 42), clock::now_ms());
+        stats.record_event(depth_envelope(44, 45), clock::now_ms());
 
         assert_eq!(stats.gap_alert_count, 1);
         assert_eq!(stats.gap_alerts[0].gap_type, "depth_update_id_gap");
@@ -249,12 +253,5 @@ mod tests {
             }),
             payload_json: "{}".to_owned(),
         }
-    }
-
-    fn unix_timestamp_ms() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-            .unwrap_or(0)
     }
 }

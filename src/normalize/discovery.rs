@@ -1,5 +1,6 @@
-use super::args::{NormalizeArgs, unix_timestamp_millis};
+use super::args::NormalizeArgs;
 use super::input_keys::{RAW_EVENT_TYPES, VENUES};
+use crate::clock;
 use crate::storage::StorageError;
 use crate::storage::s3_upload::S3Uploader;
 use chrono::{DateTime, Timelike, Utc};
@@ -23,7 +24,7 @@ pub(super) async fn resolve_last_l1_success_end_ms(
     )
     .await?;
 
-    let latest_hour_start_ms = floor_hour_ms(unix_timestamp_millis());
+    let latest_hour_start_ms = floor_hour_ms(clock::now_ms());
     for offset in 0..MAX_L1_POINTER_LOOKBACK_HOURS {
         let hour_start_ms = latest_hour_start_ms.saturating_sub(offset.saturating_mul(HOUR_MS));
         let prefix = l1_pointer_hour_prefix(args.window_ms, hour_start_ms);

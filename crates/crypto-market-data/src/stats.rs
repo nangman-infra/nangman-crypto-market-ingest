@@ -1,7 +1,7 @@
 use crate::depth_sync::{BinanceGapAlert, BinanceLocalOrderBook};
 use crate::stream_config::BinanceStreamKind;
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct MarketStreamStats {
@@ -35,8 +35,9 @@ pub struct BinanceIngestWatchStats {
     pub depth_snapshot_failures: u64,
     pub depth_books_synced: usize,
     pub depth_books_buffering: usize,
+    pub buffer_overflow_count: u64,
     pub gap_alert_count: u64,
-    pub recent_gap_alerts: Vec<BinanceGapAlert>,
+    pub recent_gap_alerts: VecDeque<BinanceGapAlert>,
 }
 
 impl BinanceIngestWatchStats {
@@ -65,8 +66,9 @@ impl BinanceIngestWatchStats {
             depth_snapshot_failures: 0,
             depth_books_synced: 0,
             depth_books_buffering: 0,
+            buffer_overflow_count: 0,
             gap_alert_count: 0,
-            recent_gap_alerts: Vec::new(),
+            recent_gap_alerts: VecDeque::new(),
         }
     }
 
@@ -91,9 +93,9 @@ impl BinanceIngestWatchStats {
 
     pub(crate) fn record_gap_alert(&mut self, alert: BinanceGapAlert) {
         self.gap_alert_count += 1;
-        self.recent_gap_alerts.push(alert);
+        self.recent_gap_alerts.push_back(alert);
         if self.recent_gap_alerts.len() > 20 {
-            self.recent_gap_alerts.remove(0);
+            self.recent_gap_alerts.pop_front();
         }
     }
 }

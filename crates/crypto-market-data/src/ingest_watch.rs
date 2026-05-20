@@ -18,6 +18,7 @@ use std::time::Duration;
 use tokio::time::{Instant, timeout_at};
 use tokio_tungstenite::{connect_async, tungstenite};
 
+#[deprecated(note = "use src/binance/ws.rs::watch_binance_l0_streams")]
 pub async fn watch_binance_ingest_streams<F>(
     config: &BinanceStreamConfig,
     duration: Duration,
@@ -80,6 +81,7 @@ where
     Ok(stats)
 }
 
+#[deprecated(note = "use src/binance/ws.rs::watch_binance_l0_streams")]
 pub async fn watch_binance_ingest_streams_with_depth_sync<F>(
     config: &BinanceStreamConfig,
     depth_sync: &BinanceDepthSyncSettings,

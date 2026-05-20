@@ -1,8 +1,12 @@
 use super::StorageError;
-use super::retention::{S3RetentionConfig, S3RetentionStats, run_s3_retention_once};
+use super::retention::{
+    S3RetentionConfig, S3RetentionStats, l0_s3_retention_config, l1_s3_retention_config,
+    run_s3_retention_once,
+};
+use crate::clock;
 use crate::log_stream;
 use serde_json::json;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +33,48 @@ pub async fn abort_s3_retention_handles(handles: Vec<JoinHandle<()>>) {
     }
 }
 
+pub struct DualBucketRetention {
+    pub l0_bucket: String,
+    pub l1_bucket: String,
+    pub aws_region: String,
+    pub aws_profile: Option<String>,
+    pub l0_retention_days: i64,
+    pub l1_retention_days: i64,
+    pub max_deletes_per_run: usize,
+    pub interval_secs: u64,
+    pub events: S3RetentionLoopEvents,
+}
+
+pub fn spawn_l0_l1_retention_loops(config: DualBucketRetention) -> Vec<JoinHandle<()>> {
+    [
+        (
+            "l0",
+            l0_s3_retention_config(
+                config.l0_bucket,
+                config.aws_region.clone(),
+                config.aws_profile.clone(),
+                config.l0_retention_days,
+                config.max_deletes_per_run,
+            ),
+        ),
+        (
+            "l1",
+            l1_s3_retention_config(
+                config.l1_bucket,
+                config.aws_region,
+                config.aws_profile,
+                config.l1_retention_days,
+                config.max_deletes_per_run,
+            ),
+        ),
+    ]
+    .into_iter()
+    .map(|(layer, retention_config)| {
+        spawn_s3_retention_loop(layer, retention_config, config.interval_secs, config.events)
+    })
+    .collect()
+}
+
 async fn run_s3_retention_loop(
     layer: &'static str,
     config: S3RetentionConfig,
@@ -39,7 +85,7 @@ async fn run_s3_retention_loop(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
-        let now_ms = unix_timestamp_millis();
+        let now_ms = clock::now_ms();
         match run_s3_retention_once(&config, now_ms).await {
             Ok(stats) => log_s3_retention_run(events.run_event, layer, &config, &stats),
             Err(error) => log_s3_retention_error(events.error_event, layer, &config, error),
@@ -85,11 +131,4 @@ fn log_s3_retention_error(
             "error": error.to_string()
         }),
     );
-}
-
-fn unix_timestamp_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }

@@ -11,6 +11,7 @@ mod tls;
 
 pub use depth_sync::{BinanceDepthSyncSettings, BinanceGapAlert};
 pub use error::MarketDataError;
+#[allow(deprecated)]
 pub use ingest_watch::{
     watch_binance_ingest_streams, watch_binance_ingest_streams_with_depth_sync,
 };

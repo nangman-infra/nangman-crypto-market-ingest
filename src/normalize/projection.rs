@@ -348,7 +348,7 @@ fn regime_context_for_window(
     let btc_return = return_for_symbol(samples, "BTC");
     let eth_return = return_for_symbol(samples, "ETH");
     let sector_return = mean(samples.iter().map(|sample| sample.return_pct));
-    let volatility = stddev(samples.iter().map(|sample| sample.return_pct));
+    let volatility = population_stddev(samples.iter().map(|sample| sample.return_pct));
     let correlation_to_btc = rolling_correlation_to_btc(returns_by_window, window_start_ms);
     let missing_reasons =
         regime_missing_reasons(btc_return, eth_return, sector_return, correlation_to_btc);
@@ -1142,10 +1142,12 @@ fn value_at_or_before(
     target_window_start_ms: i64,
     value: impl Fn(&SliceRow) -> Option<f64>,
 ) -> Option<f64> {
-    rows.iter()
-        .rev()
-        .find(|row| row.window_start_ms <= target_window_start_ms)
-        .and_then(|row| value(row))
+    // rows are sorted by window_start_ms ascending (see group_slices_by_symbol).
+    let idx = rows.partition_point(|row| row.window_start_ms <= target_window_start_ms);
+    if idx == 0 {
+        return None;
+    }
+    value(rows[idx - 1])
 }
 
 fn percent_change(now: Option<f64>, previous: Option<f64>) -> Option<f64> {
@@ -1216,7 +1218,13 @@ fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
     (count > 0).then(|| sum / count as f64)
 }
 
-fn stddev(values: impl Iterator<Item = f64>) -> Option<f64> {
+/// Population standard deviation (divisor = N).
+///
+/// volatility_regime treats the observed window as the entity to describe,
+/// not as a sample drawn from a larger population. If a caller ever needs a
+/// sample estimator, add `sample_stddev` (divisor = N - 1) explicitly so the
+/// distinction stays in the call site, not the helper name.
+fn population_stddev(values: impl Iterator<Item = f64>) -> Option<f64> {
     let values = values.filter(|value| value.is_finite()).collect::<Vec<_>>();
     if values.len() < 2 {
         return None;

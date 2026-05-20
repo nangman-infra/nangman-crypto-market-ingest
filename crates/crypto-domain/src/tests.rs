@@ -11,6 +11,32 @@ fn parses_and_compares_fixed_decimal_across_scales() {
 }
 
 #[test]
+fn ord_orders_by_numeric_value_across_scales() {
+    let ninety_nine_point_nine = FixedDecimal::parse_unsigned("99.9").unwrap();
+    let hundred_point_five = FixedDecimal::parse_unsigned("100.5").unwrap();
+    // String lexicographic order would put "100.5" before "99.9". Verify
+    // FixedDecimal Ord respects numeric order so BTreeMap<FixedDecimal, _>
+    // gives a price-sorted iteration order.
+    assert!(ninety_nine_point_nine < hundred_point_five);
+}
+
+#[test]
+fn ord_treats_equal_values_at_different_scales_as_equal() {
+    let one = FixedDecimal::parse_unsigned("1").unwrap();
+    let one_padded = FixedDecimal::parse_unsigned("1.00000000").unwrap();
+    assert_eq!(one.cmp(&one_padded), std::cmp::Ordering::Equal);
+}
+
+#[test]
+fn ord_remains_total_under_align_overflow() {
+    // i128::MAX aligned by another factor of 10 would overflow; Ord should
+    // still produce a deterministic answer.
+    let large = FixedDecimal::new(i128::MAX, 0);
+    let small_with_higher_scale = FixedDecimal::new(1, 8);
+    assert!(large > small_with_higher_scale);
+}
+
+#[test]
 fn divides_notional_by_price_to_quantity_scale() {
     let notional = FixedDecimal::parse_unsigned("100000.00").unwrap();
     let price = FixedDecimal::parse_unsigned("50000.00").unwrap();

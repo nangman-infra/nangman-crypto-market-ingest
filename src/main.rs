@@ -1,5 +1,6 @@
 use crypto_market_data::{BinanceStreamConfig, BinanceStreamKind};
 use market_ingest_app::args::{Args, Venue, parse_args, print_help};
+use market_ingest_app::clock;
 use market_ingest_app::config::load_market_ingest_config;
 use market_ingest_app::log_stream;
 use market_ingest_app::storage::{
@@ -13,13 +14,16 @@ use std::env;
 use std::error::Error;
 use std::path::Path;
 use std::process;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::task::JoinHandle;
 
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        log_stream::error("market_ingest_error", &error.to_string());
+        let _ = log_stream::error(
+            "market_ingest_error",
+            json!({ "message": error.to_string() }),
+        );
         process::exit(1);
     }
 }
@@ -88,7 +92,7 @@ fn log_unsealed_orphan_cleanup(args: &Args) {
         spool_root: args.l0_spool_root.clone(),
         safety_floor_secs: args.safety_floor_hours.saturating_mul(3_600),
     };
-    match cleanup_invalid_unsealed_once(&config, unix_timestamp_millis()) {
+    match cleanup_invalid_unsealed_once(&config, clock::now_ms()) {
         Ok(stats) => {
             let fields = json!({
                 "spool_root": config.spool_root.display().to_string(),
@@ -122,7 +126,7 @@ async fn run_eviction_loop(config: EvictionConfig, interval_secs: u64) {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
-        let now_ms = unix_timestamp_millis();
+        let now_ms = clock::now_ms();
         let probe_root = config.spool_root.clone();
         let probe = move || disk_probe(&probe_root);
         match evict_once(&config, now_ms, probe) {
@@ -155,7 +159,10 @@ async fn run_eviction_loop(config: EvictionConfig, interval_secs: u64) {
                 );
             }
             Err(error) => {
-                log_stream::error("market_ingest_eviction_error", &error.to_string());
+                let _ = log_stream::error(
+                    "market_ingest_eviction_error",
+                    json!({ "message": error.to_string() }),
+                );
             }
         }
     }
@@ -163,13 +170,6 @@ async fn run_eviction_loop(config: EvictionConfig, interval_secs: u64) {
 
 fn disk_probe(spool_root: &Path) -> Result<u8, market_ingest_app::storage::StorageError> {
     disk_used_pct(spool_root).map_err(market_ingest_app::storage::StorageError::Io)
-}
-
-fn unix_timestamp_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }
 
 async fn run_binance(args: Args) -> Result<(), Box<dyn Error>> {
@@ -266,15 +266,8 @@ fn l0_storage_config(args: &Args, venue: &str) -> Option<L0StorageConfig> {
         region: args.aws_region.clone(),
         profile: args.aws_profile.clone(),
         spool_root: args.l0_spool_root.clone(),
-        run_id: format!("market-ingest-{venue}-{}", unix_timestamp_seconds()),
+        run_id: format!("market-ingest-{venue}-{}", clock::now_secs()),
         flush_records: args.l0_flush_records,
         shard_count: args.l0_shard_count,
     })
-}
-
-fn unix_timestamp_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }

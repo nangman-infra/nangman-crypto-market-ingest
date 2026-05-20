@@ -1,7 +1,7 @@
+use crate::clock;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::env;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const APP_NAME: &str = "market-ingest-app";
 const SCHEMA_VERSION: &str = "market_ingest_log_v1";
@@ -36,15 +36,11 @@ where
     emit(Level::Warn, event, fields)
 }
 
-pub fn error(event: &str, message: &str) {
-    if !should_emit(Level::Error) {
-        return;
-    }
-    let fields = json!({ "message": message });
-    match serde_json::to_string(&envelope(Level::Error, event, fields)) {
-        Ok(output) => eprintln!("{output}"),
-        Err(_) => eprintln!("{APP_NAME} {event}: {message}"),
-    }
+pub fn error<T>(event: &str, fields: T) -> Result<(), serde_json::Error>
+where
+    T: Serialize,
+{
+    emit(Level::Error, event, fields)
 }
 
 fn emit<T>(level: Level, event: &str, fields: T) -> Result<(), serde_json::Error>
@@ -90,7 +86,7 @@ fn envelope(level: Level, event: &str, fields: Value) -> Value {
         "app": APP_NAME,
         "level": level_name(level),
         "event": event,
-        "timestamp_ms": unix_timestamp_ms(),
+        "timestamp_ms": clock::now_ms_u64(),
         "fields": fields
     })
 }
@@ -102,13 +98,6 @@ fn level_name(level: Level) -> &'static str {
         Level::Warn => "warn",
         Level::Error => "error",
     }
-}
-
-fn unix_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

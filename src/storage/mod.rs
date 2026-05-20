@@ -10,6 +10,7 @@ pub mod retention;
 pub mod retention_loop;
 pub mod s3_upload;
 mod sink;
+pub mod smoke_validation;
 pub mod symbol_health;
 
 use std::fmt;
@@ -23,7 +24,8 @@ pub use retention::{
     run_s3_retention_once,
 };
 pub use retention_loop::{
-    S3RetentionLoopEvents, abort_s3_retention_handles, spawn_s3_retention_loop,
+    DualBucketRetention, S3RetentionLoopEvents, abort_s3_retention_handles,
+    spawn_l0_l1_retention_loops, spawn_s3_retention_loop,
 };
 pub use sink::{L0StorageConfig, L0StorageSink, StorageReport};
 

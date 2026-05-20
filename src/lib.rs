@@ -1,9 +1,11 @@
 pub mod args;
 pub mod backfill;
 pub mod binance;
+pub mod clock;
 pub mod config;
 pub mod log_stream;
 pub mod normalize;
+pub mod reconnect;
 pub mod shutdown;
 pub mod storage;
 pub mod supervisor;

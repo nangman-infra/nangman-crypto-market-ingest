@@ -1,14 +1,14 @@
 use super::{
-    BackfillArgs, BackfillError, BackfillRunReport, SymbolBackfillReport, unix_timestamp_ms,
+    BackfillArgs, BackfillError, BackfillRunReport, SourceHealthSummary, SymbolBackfillReport,
+    append_empty_gap_alert, append_source_health_for, append_symbol_health_for,
+    empty_storage_report,
 };
 use crate::binance::BinanceMarket;
+use crate::clock;
 use crate::config::load_market_ingest_config;
 use crate::log_stream;
-use crate::storage::gap::GapAlertDraft;
-use crate::storage::health::SourceHealthDraft;
+use crate::storage::L0StorageSink;
 use crate::storage::record::RawMarketEventDraft;
-use crate::storage::symbol_health::SymbolHealthDraft;
-use crate::storage::{L0StorageSink, StorageReport};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -73,7 +73,7 @@ pub async fn run(
         );
     }
 
-    let observed_at_ms = unix_timestamp_ms();
+    let observed_at_ms = clock::now_ms();
     let total_record_count = symbols
         .iter()
         .map(|symbol| symbol.record_count)
@@ -82,14 +82,19 @@ pub async fn run(
         .iter()
         .map(|symbol| symbol.gap_alert_count)
         .sum::<u64>();
-    append_symbol_health(sink, &symbols, observed_at_ms).await?;
-    append_source_health(
+    append_symbol_health_for(sink, "binance", &symbols, observed_at_ms).await?;
+    append_source_health_for(
         sink,
-        observed_at_ms,
-        args,
-        resolved.markets.len(),
-        total_record_count,
-        total_gap_alert_count,
+        SourceHealthSummary {
+            venue: "binance",
+            source_role: "reference",
+            mode: "historical_trade_backfill",
+            observed_at_ms,
+            args,
+            symbol_count: resolved.markets.len(),
+            total_record_count,
+            total_gap_alert_count,
+        },
     )
     .await?;
 
@@ -192,6 +197,7 @@ async fn backfill_symbol(
             &market.raw_symbol,
             input_start_ms,
             input_end_ms,
+            "no_trade_records_returned",
         )
         .await?;
         return Ok(report);
@@ -251,6 +257,7 @@ async fn backfill_symbol(
             &market.raw_symbol,
             input_start_ms,
             input_end_ms,
+            "no_trade_records_returned",
         )
         .await?;
     }
@@ -361,7 +368,7 @@ fn raw_trade_draft(
         base_asset: market.base_asset.clone(),
         quote_asset: market.quote_asset.clone(),
         exchange_timestamp_ms: trade.trade_timestamp_ms,
-        ingest_timestamp_ms: unix_timestamp_ms(),
+        ingest_timestamp_ms: clock::now_ms(),
         sequence_id: sequence_tag.clone(),
         sequence_tag,
         exchange_sequence: Some(trade.aggregate_trade_id),
@@ -372,113 +379,6 @@ fn raw_trade_draft(
         stream_phase: "backfill".to_owned(),
         payload_json: serde_json::to_string(&payload)?,
     })
-}
-
-async fn append_empty_gap_alert(
-    sink: &mut L0StorageSink,
-    venue: &str,
-    source_role: &str,
-    symbol_native: &str,
-    input_start_ms: i64,
-    input_end_ms: i64,
-) -> Result<(), BackfillError> {
-    sink.append_gap_alert(GapAlertDraft {
-        venue: venue.to_owned(),
-        source_role: source_role.to_owned(),
-        symbol_native: symbol_native.to_owned(),
-        gap_type: "historical_range_empty".to_owned(),
-        detected_at_ms: unix_timestamp_ms(),
-        expected_sequence_id: None,
-        observed_sequence_id: None,
-        heal_action: "review_range_or_source".to_owned(),
-        heal_status: "open".to_owned(),
-        payload_json: serde_json::to_string(&json!({
-            "input_start_ms": input_start_ms,
-            "input_end_ms": input_end_ms,
-            "reason": "no_trade_records_returned"
-        }))?,
-    })
-    .await
-    .map_err(|error| BackfillError::Storage(error.to_string()))
-}
-
-async fn append_symbol_health(
-    sink: &mut L0StorageSink,
-    symbols: &[SymbolBackfillReport],
-    observed_at_ms: i64,
-) -> Result<(), BackfillError> {
-    for symbol in symbols {
-        let last_event_time_ms = symbol.last_event_time_ms.unwrap_or(0);
-        sink.append_symbol_health(SymbolHealthDraft {
-            venue: "binance".to_owned(),
-            symbol_native: symbol.symbol_native.clone(),
-            observed_at_ms,
-            last_event_time_ms,
-            latency_ms: observed_at_ms.saturating_sub(last_event_time_ms).max(0),
-            is_tradeable: symbol.record_count > 0,
-            reason_codes: if symbol.record_count > 0 {
-                Vec::new()
-            } else {
-                vec!["no_historical_trades".to_owned()]
-            },
-        })
-        .await
-        .map_err(|error| BackfillError::Storage(error.to_string()))?;
-    }
-    Ok(())
-}
-
-async fn append_source_health(
-    sink: &mut L0StorageSink,
-    observed_at_ms: i64,
-    args: &BackfillArgs,
-    symbol_count: usize,
-    total_record_count: u64,
-    total_gap_alert_count: u64,
-) -> Result<(), BackfillError> {
-    sink.append_source_health(SourceHealthDraft {
-        venue: "binance".to_owned(),
-        source_role: "reference".to_owned(),
-        observed_at_ms,
-        connection_status: "historical_backfill_completed".to_owned(),
-        heartbeat_delay_ms: 0,
-        stream_lag_ms: observed_at_ms.saturating_sub(args.input_end_ms).max(0),
-        recent_gap_count: total_gap_alert_count,
-        book_rebuild_count: 0,
-        health_level: if total_gap_alert_count == 0 {
-            "ok"
-        } else {
-            "warn"
-        }
-        .to_owned(),
-        payload_json: serde_json::to_string(&json!({
-            "mode": "historical_trade_backfill",
-            "symbol_count": symbol_count,
-            "input_start_ms": args.input_start_ms,
-            "input_end_ms": args.input_end_ms,
-            "record_count": total_record_count,
-            "gap_alert_count": total_gap_alert_count
-        }))?,
-    })
-    .await
-    .map_err(|error| BackfillError::Storage(error.to_string()))
-}
-
-fn empty_storage_report() -> StorageReport {
-    StorageReport {
-        bucket: String::new(),
-        run_id: String::new(),
-        record_count: 0,
-        uploaded_object_count: 0,
-        uploaded_object_retained_count: 0,
-        uploaded_object_dropped_count: 0,
-        uploaded_objects: Vec::new(),
-        failed_upload_count: 0,
-        failed_upload_retained_count: 0,
-        failed_upload_dropped_count: 0,
-        failed_uploads: Vec::new(),
-        manifest_key: None,
-    }
 }
 
 #[cfg(test)]

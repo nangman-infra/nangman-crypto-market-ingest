@@ -2,14 +2,18 @@ pub mod args;
 mod binance;
 mod upbit;
 
+use crate::clock;
 use crate::log_stream;
+use crate::storage::gap::GapAlertDraft;
+use crate::storage::health::SourceHealthDraft;
+use crate::storage::symbol_health::SymbolHealthDraft;
 use crate::storage::{
     L0StorageConfig, L0StorageSink, S3RetentionConfig, StorageReport,
     default_l0_retention_prefixes, run_s3_retention_once,
 };
 use serde::Serialize;
+use serde_json::json;
 use std::fmt;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use args::{BackfillArgs, Venue, parse_args, print_help};
 
@@ -156,7 +160,7 @@ async fn log_l0_retention_cleanup(args: &BackfillArgs) -> Result<(), BackfillErr
         retention_secs: args.s3_retention_days.saturating_mul(86_400),
         max_deletes_per_run: args.s3_retention_max_deletes_per_run,
     };
-    match run_s3_retention_once(&config, unix_timestamp_ms()).await {
+    match run_s3_retention_once(&config, clock::now_ms()).await {
         Ok(stats) => log_stream::info(
             "market_backfill_s3_retention_run",
             serde_json::json!({
@@ -192,23 +196,128 @@ fn storage_config(args: &BackfillArgs) -> L0StorageConfig {
         run_id: format!(
             "market-backfill-{}-{}",
             args.venue.as_str(),
-            unix_timestamp_seconds()
+            clock::now_secs()
         ),
         flush_records: args.l0_flush_records,
         shard_count: args.l0_shard_count,
     }
 }
 
-pub(crate) fn unix_timestamp_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
+pub(crate) async fn append_empty_gap_alert(
+    sink: &mut L0StorageSink,
+    venue: &str,
+    source_role: &str,
+    symbol_native: &str,
+    input_start_ms: i64,
+    input_end_ms: i64,
+    reason: &str,
+) -> Result<(), BackfillError> {
+    sink.append_gap_alert(GapAlertDraft {
+        venue: venue.to_owned(),
+        source_role: source_role.to_owned(),
+        symbol_native: symbol_native.to_owned(),
+        gap_type: "historical_range_empty".to_owned(),
+        detected_at_ms: clock::now_ms(),
+        expected_sequence_id: None,
+        observed_sequence_id: None,
+        heal_action: "review_range_or_source".to_owned(),
+        heal_status: "open".to_owned(),
+        payload_json: serde_json::to_string(&json!({
+            "input_start_ms": input_start_ms,
+            "input_end_ms": input_end_ms,
+            "reason": reason
+        }))?,
+    })
+    .await
+    .map_err(|error| BackfillError::Storage(error.to_string()))
 }
 
-fn unix_timestamp_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
+pub(crate) async fn append_symbol_health_for(
+    sink: &mut L0StorageSink,
+    venue: &str,
+    symbols: &[SymbolBackfillReport],
+    observed_at_ms: i64,
+) -> Result<(), BackfillError> {
+    for symbol in symbols {
+        let last_event_time_ms = symbol.last_event_time_ms.unwrap_or(0);
+        sink.append_symbol_health(SymbolHealthDraft {
+            venue: venue.to_owned(),
+            symbol_native: symbol.symbol_native.clone(),
+            observed_at_ms,
+            last_event_time_ms,
+            latency_ms: observed_at_ms.saturating_sub(last_event_time_ms).max(0),
+            is_tradeable: symbol.record_count > 0,
+            reason_codes: if symbol.record_count > 0 {
+                Vec::new()
+            } else {
+                vec!["no_historical_trades".to_owned()]
+            },
+        })
+        .await
+        .map_err(|error| BackfillError::Storage(error.to_string()))?;
+    }
+    Ok(())
+}
+
+pub(crate) struct SourceHealthSummary<'a> {
+    pub venue: &'a str,
+    pub source_role: &'a str,
+    pub mode: &'a str,
+    pub observed_at_ms: i64,
+    pub args: &'a BackfillArgs,
+    pub symbol_count: usize,
+    pub total_record_count: u64,
+    pub total_gap_alert_count: u64,
+}
+
+pub(crate) async fn append_source_health_for(
+    sink: &mut L0StorageSink,
+    summary: SourceHealthSummary<'_>,
+) -> Result<(), BackfillError> {
+    sink.append_source_health(SourceHealthDraft {
+        venue: summary.venue.to_owned(),
+        source_role: summary.source_role.to_owned(),
+        observed_at_ms: summary.observed_at_ms,
+        connection_status: "historical_backfill_completed".to_owned(),
+        heartbeat_delay_ms: 0,
+        stream_lag_ms: summary
+            .observed_at_ms
+            .saturating_sub(summary.args.input_end_ms)
+            .max(0),
+        recent_gap_count: summary.total_gap_alert_count,
+        book_rebuild_count: 0,
+        health_level: if summary.total_gap_alert_count == 0 {
+            "ok"
+        } else {
+            "warn"
+        }
+        .to_owned(),
+        payload_json: serde_json::to_string(&json!({
+            "mode": summary.mode,
+            "symbol_count": summary.symbol_count,
+            "input_start_ms": summary.args.input_start_ms,
+            "input_end_ms": summary.args.input_end_ms,
+            "record_count": summary.total_record_count,
+            "gap_alert_count": summary.total_gap_alert_count
+        }))?,
+    })
+    .await
+    .map_err(|error| BackfillError::Storage(error.to_string()))
+}
+
+pub(crate) fn empty_storage_report() -> StorageReport {
+    StorageReport {
+        bucket: String::new(),
+        run_id: String::new(),
+        record_count: 0,
+        uploaded_object_count: 0,
+        uploaded_object_retained_count: 0,
+        uploaded_object_dropped_count: 0,
+        uploaded_objects: Vec::new(),
+        failed_upload_count: 0,
+        failed_upload_retained_count: 0,
+        failed_upload_dropped_count: 0,
+        failed_uploads: Vec::new(),
+        manifest_key: None,
+    }
 }

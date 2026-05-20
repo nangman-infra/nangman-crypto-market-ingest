@@ -12,7 +12,7 @@ use super::record::{RawMarketEventDraft, RawMarketEventRecord};
 use super::s3_upload::S3Uploader;
 use super::symbol_health::{SymbolHealthDraft, SymbolHealthRecord, write_symbol_health_parquet};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
 const MAX_REPORTED_OBJECTS: usize = 1_000;
@@ -73,10 +73,10 @@ pub struct L0StorageSink {
     health_part_numbers: BTreeMap<HealthPartitionKey, u64>,
     symbol_health_part_numbers: BTreeMap<SymbolHealthPartitionKey, u64>,
     gap_part_numbers: BTreeMap<GapPartitionKey, u64>,
-    uploaded_objects: Vec<UploadedObject>,
+    uploaded_objects: VecDeque<UploadedObject>,
     uploaded_object_count: usize,
     uploaded_object_dropped_count: usize,
-    failed_uploads: Vec<FailedUploadObject>,
+    failed_uploads: VecDeque<FailedUploadObject>,
     failed_upload_count: usize,
     failed_upload_dropped_count: usize,
     next_ordinal: u64,
@@ -103,10 +103,10 @@ impl L0StorageSink {
             health_part_numbers: BTreeMap::new(),
             symbol_health_part_numbers: BTreeMap::new(),
             gap_part_numbers: BTreeMap::new(),
-            uploaded_objects: Vec::new(),
+            uploaded_objects: VecDeque::new(),
             uploaded_object_count: 0,
             uploaded_object_dropped_count: 0,
-            failed_uploads: Vec::new(),
+            failed_uploads: VecDeque::new(),
             failed_upload_count: 0,
             failed_upload_dropped_count: 0,
             next_ordinal: 1,
@@ -239,11 +239,11 @@ impl L0StorageSink {
             uploaded_object_count: self.uploaded_object_count,
             uploaded_object_retained_count: self.uploaded_objects.len(),
             uploaded_object_dropped_count: self.uploaded_object_dropped_count,
-            uploaded_objects: self.uploaded_objects.clone(),
+            uploaded_objects: self.uploaded_objects.iter().cloned().collect(),
             failed_upload_count: self.failed_upload_count,
             failed_upload_retained_count: self.failed_uploads.len(),
             failed_upload_dropped_count: self.failed_upload_dropped_count,
-            failed_uploads: self.failed_uploads.clone(),
+            failed_uploads: self.failed_uploads.iter().cloned().collect(),
             manifest_key: self.manifest_key.clone(),
         }
     }
@@ -354,7 +354,7 @@ impl L0StorageSink {
 
     fn record_uploaded_object(&mut self, object: UploadedObject) {
         self.uploaded_object_count += 1;
-        append_capped(
+        push_capped_deque(
             &mut self.uploaded_objects,
             object,
             MAX_REPORTED_OBJECTS,
@@ -364,7 +364,7 @@ impl L0StorageSink {
 
     fn record_failed_upload(&mut self, failure: FailedUploadObject) {
         self.failed_upload_count += 1;
-        append_capped(
+        push_capped_deque(
             &mut self.failed_uploads,
             failure,
             MAX_REPORTED_FAILURES,
@@ -410,6 +410,19 @@ fn append_capped<T>(values: &mut Vec<T>, value: T, max_len: usize, dropped_count
     values.push(value);
     if values.len() > max_len {
         values.remove(0);
+        *dropped_count += 1;
+    }
+}
+
+fn push_capped_deque<T>(
+    values: &mut VecDeque<T>,
+    value: T,
+    max_len: usize,
+    dropped_count: &mut usize,
+) {
+    values.push_back(value);
+    if values.len() > max_len {
+        values.pop_front();
         *dropped_count += 1;
     }
 }

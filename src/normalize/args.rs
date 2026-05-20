@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_AWS_REGION: &str = "ap-northeast-2";
 const DEFAULT_L0_LOCAL_ROOT: &str = "/opt/nangman-crypto/data/spool/market-ingest/l0";
@@ -281,13 +280,6 @@ and --audit-l1-index-* are also one-shot. S3 retention cleanup is app-owned
 for both L0 and L1 buckets in long-lived worker mode. L0 defaults to 45 days;
 L1 defaults to 240 days. Bucket lifecycle remains only a fallback safety net."#
     );
-}
-
-pub fn unix_timestamp_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }
 
 fn parse_i64_arg(value: Option<String>, name: &str) -> Result<i64, Box<dyn Error>> {

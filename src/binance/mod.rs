@@ -4,16 +4,18 @@ mod rest;
 mod stats;
 mod ws;
 use self::stats::BinanceL0WatchStats;
+use crate::clock;
 use crate::log_stream;
 use crate::storage::gap::GapAlertDraft;
 use crate::storage::health::SourceHealthDraft;
+use crate::storage::smoke_validation;
 use crate::storage::symbol_health::SymbolHealthDraft;
 use crate::storage::{L0StorageConfig, L0StorageSink, StorageReport};
 use crypto_market_data::{BinanceStreamConfig, BinanceStreamKind, MarketDataError};
 use serde::Serialize;
 use std::fmt;
 use std::str::Utf8Error;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio_tungstenite::tungstenite;
 #[derive(Debug, Clone)]
 pub struct BinanceMarket {
@@ -169,7 +171,7 @@ pub async fn run_binance_l0_smoke(config: BinanceRunConfig) -> Result<(), Binanc
         derivatives::append_derivative_snapshots(
             &config.futures_rest_base_url,
             &config.markets,
-            unix_timestamp_ms(),
+            clock::now_ms(),
             sink,
         )
         .await?
@@ -257,7 +259,7 @@ async fn append_depth_snapshots(
             &config.rest_base_url,
             market,
             config.depth_snapshot_limit,
-            unix_timestamp_ms(),
+            clock::now_ms(),
         )
         .await?;
         sink.append_raw_market_event(draft)
@@ -331,8 +333,9 @@ fn validate_storage_report(
     report: &BinanceL0SmokeReport,
     storage: &StorageReport,
 ) -> Result<(), BinanceIngestError> {
-    validate_common_storage_report(storage, "Binance")?;
-    if report.gap_alert_count > 0 && !storage_has_family(storage, "gap_alert") {
+    smoke_validation::validate_common_storage_report(storage, "Binance")
+        .map_err(BinanceIngestError::InvalidMessage)?;
+    if report.gap_alert_count > 0 && !smoke_validation::storage_has_family(storage, "gap_alert") {
         return Err(BinanceIngestError::InvalidMessage(
             "Binance L0 storage observed gaps but uploaded no gap_alert".to_owned(),
         ));
@@ -343,50 +346,6 @@ fn validate_storage_report(
         ));
     }
     Ok(())
-}
-
-fn validate_common_storage_report(
-    storage: &StorageReport,
-    venue: &str,
-) -> Result<(), BinanceIngestError> {
-    if storage.failed_upload_count > 0 {
-        return Err(BinanceIngestError::InvalidMessage(format!(
-            "{venue} L0 storage exhausted retries for {} uploads",
-            storage.failed_upload_count
-        )));
-    }
-    if storage.record_count == 0 || storage.uploaded_object_count == 0 {
-        return Err(BinanceIngestError::InvalidMessage(format!(
-            "{venue} L0 storage produced no objects"
-        )));
-    }
-    if storage.manifest_key.is_none() {
-        return Err(BinanceIngestError::InvalidMessage(format!(
-            "{venue} L0 storage did not upload manifest.json"
-        )));
-    }
-    require_storage_family(storage, venue, "source_health")?;
-    require_storage_family(storage, venue, "symbol_health")
-}
-
-fn require_storage_family(
-    storage: &StorageReport,
-    venue: &str,
-    object_family: &str,
-) -> Result<(), BinanceIngestError> {
-    if storage_has_family(storage, object_family) {
-        return Ok(());
-    }
-    Err(BinanceIngestError::InvalidMessage(format!(
-        "{venue} L0 storage did not upload {object_family}"
-    )))
-}
-
-fn storage_has_family(storage: &StorageReport, object_family: &str) -> bool {
-    storage
-        .uploaded_objects
-        .iter()
-        .any(|object| object.object_family == object_family)
 }
 
 fn print_binance_ingest_log(stats: &BinanceL0WatchStats) {
@@ -412,7 +371,7 @@ fn print_binance_ingest_log(stats: &BinanceL0WatchStats) {
 }
 
 fn source_health_draft(stats: &BinanceL0WatchStats) -> SourceHealthDraft {
-    let observed_at_ms = unix_timestamp_ms();
+    let observed_at_ms = clock::now_ms();
     SourceHealthDraft {
         venue: "binance".to_owned(),
         source_role: "reference".to_owned(),
@@ -477,7 +436,7 @@ fn symbol_health_payload(
 }
 
 fn symbol_health_drafts(stats: &BinanceL0WatchStats) -> Vec<SymbolHealthDraft> {
-    let observed_at_ms = unix_timestamp_ms();
+    let observed_at_ms = clock::now_ms();
     stats
         .symbol_counts
         .keys()
@@ -541,11 +500,4 @@ fn health_level(stats: &BinanceL0WatchStats) -> String {
     } else {
         "degraded".to_owned()
     }
-}
-
-fn unix_timestamp_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }
