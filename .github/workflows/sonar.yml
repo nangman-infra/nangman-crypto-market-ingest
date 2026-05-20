@@ -105,12 +105,7 @@ jobs:
               exit 0
             fi
 
-            analysis_id="$(python3 -c 'import json, sys
-            try:
-                print(json.load(sys.stdin).get("task", {}).get("analysisId", ""))
-            except Exception:
-                print("")
-            ' <<< "${task_json}")"
+            analysis_id="$(TASK_JSON="${task_json}" python3 -c 'import json, os; print(json.loads(os.environ["TASK_JSON"]).get("task", {}).get("analysisId", ""))' || true)"
             if [ -n "${analysis_id}" ]; then
               break
             fi
@@ -129,26 +124,7 @@ jobs:
             exit 0
           fi
 
-          python3 -c '
-          import json, sys
-          try:
-              data = json.load(sys.stdin)
-          except Exception as error:
-              print("SonarQube quality gate response was not JSON: {}".format(error))
-              sys.exit(0)
-          status = data.get("projectStatus", {})
-          print("SonarQube quality gate: {}".format(status.get("status", "UNKNOWN")))
-          for condition in status.get("conditions", []):
-              print(
-                  "{}: {} actual={} threshold={} comparator={}".format(
-                      condition.get("status", "UNKNOWN"),
-                      condition.get("metricKey", "unknown_metric"),
-                      condition.get("actualValue", "n/a"),
-                      condition.get("errorThreshold", "n/a"),
-                      condition.get("comparator", "n/a"),
-                  )
-              )
-          ' <<< "${gate_json}"
+          GATE_JSON="${gate_json}" python3 -c 'import json, os; data = json.loads(os.environ["GATE_JSON"]); status = data.get("projectStatus", {}); print("SonarQube quality gate: {}".format(status.get("status", "UNKNOWN"))); [print("{}: {} actual={} threshold={} comparator={}".format(condition.get("status", "UNKNOWN"), condition.get("metricKey", "unknown_metric"), condition.get("actualValue", "n/a"), condition.get("errorThreshold", "n/a"), condition.get("comparator", "n/a"))) for condition in status.get("conditions", [])]'
 
           issues_json="$(curl --silent --show-error --user "${SONAR_TOKEN}:" --get "${SONAR_HOST_URL}/api/issues/search" --data-urlencode "componentKeys=nangman-crypto-market-ingest" --data-urlencode "resolved=false" --data-urlencode "inNewCodePeriod=true" --data-urlencode "ps=20" || true)"
           if [ -z "${issues_json}" ]; then
@@ -156,21 +132,4 @@ jobs:
             exit 0
           fi
 
-          python3 -c '
-          import json, sys
-          try:
-              data = json.load(sys.stdin)
-          except Exception as error:
-              print("SonarQube issue response was not JSON: {}".format(error))
-              sys.exit(0)
-          for issue in data.get("issues", []):
-              location = "{}:{}".format(issue.get("component", "unknown"), issue.get("line", "n/a"))
-              print(
-                  "SonarQube issue: {} {} {} {}".format(
-                      issue.get("severity", "UNKNOWN"),
-                      issue.get("rule", "unknown-rule"),
-                      location,
-                      issue.get("message", ""),
-                  )
-              )
-          ' <<< "${issues_json}"
+          ISSUES_JSON="${issues_json}" python3 -c 'import json, os; data = json.loads(os.environ["ISSUES_JSON"]); [print("SonarQube issue: {} {} {}:{}".format(issue.get("severity", "UNKNOWN"), issue.get("rule", "unknown-rule"), issue.get("component", "unknown"), issue.get("line", "n/a")) + " " + issue.get("message", "")) for issue in data.get("issues", [])]'
