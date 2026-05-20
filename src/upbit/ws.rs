@@ -27,6 +27,20 @@ enum SessionEnd {
     Disconnected(&'static str),
 }
 
+enum SessionPoll {
+    Message(tungstenite::Message),
+    Disconnected(&'static str),
+    Tick,
+}
+
+struct SessionTimers {
+    next_log_at: Instant,
+    next_ping_at: Instant,
+    last_message_at: Instant,
+    log_interval: Duration,
+    stale_timeout: Duration,
+}
+
 pub async fn watch_upbit_ingest_streams(
     websocket_url: &str,
     markets: &[UpbitMarket],
@@ -178,9 +192,13 @@ async fn run_session(
     shutdown_flag: &Arc<AtomicBool>,
 ) -> Result<SessionEnd, UpbitIngestError> {
     let now = Instant::now();
-    let mut next_log_at = now + log_interval;
-    let mut next_ping_at = now + Duration::from_secs(30);
-    let mut last_message_at = now;
+    let mut timers = SessionTimers {
+        next_log_at: now + log_interval,
+        next_ping_at: now + Duration::from_secs(30),
+        last_message_at: now,
+        log_interval,
+        stale_timeout,
+    };
 
     loop {
         if shutdown_flag.load(Ordering::SeqCst) {
@@ -190,16 +208,11 @@ async fn run_session(
         if now >= deadline {
             return Ok(SessionEnd::DeadlineReached);
         }
-        let stale_at = last_message_at + stale_timeout;
-        let poll_tick = now + Duration::from_millis(250);
-        let next_tick = [deadline, next_log_at, next_ping_at, stale_at, poll_tick]
-            .into_iter()
-            .min()
-            .unwrap_or(deadline);
+        let next_tick = next_session_tick(deadline, &timers, now);
 
-        match timeout_at(next_tick, websocket.next()).await {
-            Ok(Some(Ok(message))) => {
-                last_message_at = Instant::now();
+        match poll_session(&mut websocket, next_tick).await? {
+            SessionPoll::Message(message) => {
+                timers.last_message_at = Instant::now();
                 if let Err(error) =
                     handle_message(message, stats, storage.as_deref_mut(), markets_by_code).await
                 {
@@ -208,36 +221,75 @@ async fn run_session(
                     return Ok(SessionEnd::Disconnected("message_error"));
                 }
             }
-            Ok(Some(Err(_))) => {
-                stats.malformed_messages += 1;
-                return Ok(SessionEnd::Disconnected("websocket_error"));
+            SessionPoll::Disconnected(reason) => {
+                stats.malformed_messages += u64::from(reason == "websocket_error");
+                return Ok(SessionEnd::Disconnected(reason));
             }
-            Ok(None) => {
-                return Ok(SessionEnd::Disconnected("ended"));
-            }
-            Err(_) => {}
+            SessionPoll::Tick => {}
         }
 
-        let now = Instant::now();
-        if now >= last_message_at + stale_timeout {
-            return Ok(SessionEnd::Disconnected("stale_timeout"));
-        }
-        if now >= next_ping_at {
-            if websocket
-                .send(tungstenite::Message::Ping(Vec::new().into()))
-                .await
-                .is_err()
-            {
-                return Ok(SessionEnd::Disconnected("ping_failed"));
-            }
-            next_ping_at += Duration::from_secs(30);
-        }
-        if now >= next_log_at {
-            stats.update_health();
-            log_callback(stats);
-            next_log_at += log_interval;
+        if let Some(end) = run_housekeeping(&mut websocket, stats, &mut timers, log_callback).await
+        {
+            return Ok(end);
         }
     }
+}
+
+fn next_session_tick(deadline: Instant, timers: &SessionTimers, now: Instant) -> Instant {
+    let stale_at = timers.last_message_at + timers.stale_timeout;
+    let poll_tick = now + Duration::from_millis(250);
+    [
+        deadline,
+        timers.next_log_at,
+        timers.next_ping_at,
+        stale_at,
+        poll_tick,
+    ]
+    .into_iter()
+    .min()
+    .unwrap_or(deadline)
+}
+
+async fn poll_session(
+    websocket: &mut Websocket,
+    next_tick: Instant,
+) -> Result<SessionPoll, UpbitIngestError> {
+    match timeout_at(next_tick, websocket.next()).await {
+        Ok(Some(Ok(message))) => Ok(SessionPoll::Message(message)),
+        Ok(Some(Err(_))) => Ok(SessionPoll::Disconnected("websocket_error")),
+        Ok(None) => Ok(SessionPoll::Disconnected("ended")),
+        Err(_) => Ok(SessionPoll::Tick),
+    }
+}
+
+async fn run_housekeeping(
+    websocket: &mut Websocket,
+    stats: &mut UpbitIngestWatchStats,
+    timers: &mut SessionTimers,
+    log_callback: &impl Fn(&UpbitIngestWatchStats),
+) -> Option<SessionEnd> {
+    let now = Instant::now();
+    if now >= timers.last_message_at + timers.stale_timeout {
+        return Some(SessionEnd::Disconnected("stale_timeout"));
+    }
+    if now >= timers.next_ping_at && send_ping(websocket).await.is_err() {
+        return Some(SessionEnd::Disconnected("ping_failed"));
+    }
+    if now >= timers.next_ping_at {
+        timers.next_ping_at += Duration::from_secs(30);
+    }
+    if now >= timers.next_log_at {
+        stats.update_health();
+        log_callback(stats);
+        timers.next_log_at += timers.log_interval;
+    }
+    None
+}
+
+async fn send_ping(websocket: &mut Websocket) -> Result<(), tungstenite::Error> {
+    websocket
+        .send(tungstenite::Message::Ping(Vec::new().into()))
+        .await
 }
 
 async fn handle_message(

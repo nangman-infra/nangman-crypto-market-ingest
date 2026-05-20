@@ -74,90 +74,198 @@ pub(crate) async fn handle_diff_depth_event(
 ) -> Result<(), MarketDataError> {
     let raw_symbol = event.symbol.to_ascii_uppercase();
     let book = books.entry(raw_symbol.clone()).or_default();
-    if let Some(last_update_id) = book.last_update_id {
-        if event.final_update_id <= last_update_id {
-            return Ok(());
-        }
-        if event.first_update_id > last_update_id + 1 {
-            stats.record_gap_alert(BinanceGapAlert {
-                gap_type: "sequence_gap".to_owned(),
-                symbol: raw_symbol.clone(),
-                detected_at_ms: received_time_ms,
-                expected_sequence_id: Some(last_update_id + 1),
-                observed_sequence_id: Some(event.first_update_id),
-                heal_action: "refetch_snapshot".to_owned(),
-                heal_status: "resync_requested".to_owned(),
-            });
-            book.reset_for_resync(event);
-            snapshot_attempted.remove(&raw_symbol);
-        } else if let Err(alert) = apply_depth_delta(book, &event) {
-            let alert = *alert;
-            book.reset_after_overflow();
-            snapshot_attempted.remove(&raw_symbol);
-            stats.record_gap_alert(BinanceGapAlert {
-                symbol: raw_symbol.clone(),
-                detected_at_ms: received_time_ms,
-                ..alert
-            });
-        }
+    if book.is_synced() {
+        handle_synced_depth_event(
+            book,
+            event,
+            &raw_symbol,
+            received_time_ms,
+            snapshot_attempted,
+            stats,
+        );
     } else {
-        if book.buffered_at_capacity() {
-            let dropped_count = book.buffered_events.len();
-            book.reset_after_overflow();
-            snapshot_attempted.remove(&raw_symbol);
-            stats.buffer_overflow_count += 1;
-            stats.record_gap_alert(BinanceGapAlert {
-                gap_type: "buffered_overflow".to_owned(),
-                symbol: raw_symbol.clone(),
-                detected_at_ms: received_time_ms,
-                expected_sequence_id: None,
-                observed_sequence_id: Some(event.first_update_id),
-                heal_action: "refetch_snapshot".to_owned(),
-                heal_status: format!("dropped_count={dropped_count}"),
-            });
-        }
-        book.buffered_events.push(event);
+        buffer_unsynced_depth_event(
+            book,
+            event,
+            &raw_symbol,
+            received_time_ms,
+            snapshot_attempted,
+            stats,
+        );
     }
 
-    if books.get(&raw_symbol).is_some_and(|book| !book.is_synced())
-        && snapshot_attempted.insert(raw_symbol.clone())
-    {
-        stats.depth_snapshot_requests += 1;
-        let snapshot = fetch_binance_depth_snapshot(http_client, depth_sync, &raw_symbol).await;
-        match snapshot {
-            Ok(snapshot) => {
-                stats.depth_snapshot_successes += 1;
-                let Some(book) = books.get_mut(&raw_symbol) else {
-                    return Ok(());
-                };
-                match sync_depth_book_from_snapshot(book, snapshot) {
-                    Ok(()) => {}
-                    Err(alert) => {
-                        let alert = *alert;
-                        stats.record_gap_alert(BinanceGapAlert {
-                            symbol: raw_symbol.clone(),
-                            detected_at_ms: received_time_ms,
-                            ..alert
-                        });
-                        snapshot_attempted.remove(&raw_symbol);
-                    }
-                }
-            }
-            Err(error) => {
-                stats.depth_snapshot_failures += 1;
-                stats.record_gap_alert(BinanceGapAlert {
-                    gap_type: "snapshot_fetch_failed".to_owned(),
-                    symbol: raw_symbol,
-                    detected_at_ms: received_time_ms,
-                    expected_sequence_id: None,
-                    observed_sequence_id: None,
-                    heal_action: "retry_snapshot".to_owned(),
-                    heal_status: format!("failed: {error}"),
-                });
-            }
-        }
+    if should_fetch_snapshot(books, snapshot_attempted, &raw_symbol) {
+        fetch_and_sync_snapshot(
+            depth_sync,
+            http_client,
+            books,
+            snapshot_attempted,
+            stats,
+            &raw_symbol,
+            received_time_ms,
+        )
+        .await?;
     }
     Ok(())
+}
+
+fn handle_synced_depth_event(
+    book: &mut BinanceLocalOrderBook,
+    event: BinanceDiffDepthMessage,
+    raw_symbol: &str,
+    received_time_ms: TimestampMs,
+    snapshot_attempted: &mut HashSet<String>,
+    stats: &mut BinanceIngestWatchStats,
+) {
+    let Some(last_update_id) = book.last_update_id else {
+        return;
+    };
+    if event.final_update_id <= last_update_id {
+        return;
+    }
+    if event.first_update_id > last_update_id + 1 {
+        record_sequence_gap(
+            stats,
+            raw_symbol,
+            received_time_ms,
+            last_update_id + 1,
+            event.first_update_id,
+        );
+        book.reset_for_resync(event);
+        snapshot_attempted.remove(raw_symbol);
+        return;
+    }
+    if let Err(alert) = apply_depth_delta(book, &event) {
+        record_delta_parse_gap(stats, raw_symbol, received_time_ms, *alert);
+        book.reset_after_overflow();
+        snapshot_attempted.remove(raw_symbol);
+    }
+}
+
+fn buffer_unsynced_depth_event(
+    book: &mut BinanceLocalOrderBook,
+    event: BinanceDiffDepthMessage,
+    raw_symbol: &str,
+    received_time_ms: TimestampMs,
+    snapshot_attempted: &mut HashSet<String>,
+    stats: &mut BinanceIngestWatchStats,
+) {
+    if book.buffered_at_capacity() {
+        let dropped_count = book.buffered_events.len();
+        book.reset_after_overflow();
+        snapshot_attempted.remove(raw_symbol);
+        stats.buffer_overflow_count += 1;
+        stats.record_gap_alert(BinanceGapAlert {
+            gap_type: "buffered_overflow".to_owned(),
+            symbol: raw_symbol.to_owned(),
+            detected_at_ms: received_time_ms,
+            expected_sequence_id: None,
+            observed_sequence_id: Some(event.first_update_id),
+            heal_action: "refetch_snapshot".to_owned(),
+            heal_status: format!("dropped_count={dropped_count}"),
+        });
+    }
+    book.buffered_events.push(event);
+}
+
+fn should_fetch_snapshot(
+    books: &BTreeMap<String, BinanceLocalOrderBook>,
+    snapshot_attempted: &mut HashSet<String>,
+    raw_symbol: &str,
+) -> bool {
+    books.get(raw_symbol).is_some_and(|book| !book.is_synced())
+        && snapshot_attempted.insert(raw_symbol.to_owned())
+}
+
+async fn fetch_and_sync_snapshot(
+    depth_sync: &BinanceDepthSyncSettings,
+    http_client: &reqwest::Client,
+    books: &mut BTreeMap<String, BinanceLocalOrderBook>,
+    snapshot_attempted: &mut HashSet<String>,
+    stats: &mut BinanceIngestWatchStats,
+    raw_symbol: &str,
+    received_time_ms: TimestampMs,
+) -> Result<(), MarketDataError> {
+    stats.depth_snapshot_requests += 1;
+    match fetch_binance_depth_snapshot(http_client, depth_sync, raw_symbol).await {
+        Ok(snapshot) => sync_fetched_snapshot(
+            books,
+            snapshot_attempted,
+            stats,
+            raw_symbol,
+            received_time_ms,
+            snapshot,
+        ),
+        Err(error) => record_snapshot_fetch_failure(stats, raw_symbol, received_time_ms, error),
+    }
+    Ok(())
+}
+
+fn sync_fetched_snapshot(
+    books: &mut BTreeMap<String, BinanceLocalOrderBook>,
+    snapshot_attempted: &mut HashSet<String>,
+    stats: &mut BinanceIngestWatchStats,
+    raw_symbol: &str,
+    received_time_ms: TimestampMs,
+    snapshot: BinanceOrderBookSnapshot,
+) {
+    stats.depth_snapshot_successes += 1;
+    let Some(book) = books.get_mut(raw_symbol) else {
+        return;
+    };
+    if let Err(alert) = sync_depth_book_from_snapshot(book, snapshot) {
+        record_delta_parse_gap(stats, raw_symbol, received_time_ms, *alert);
+        snapshot_attempted.remove(raw_symbol);
+    }
+}
+
+fn record_sequence_gap(
+    stats: &mut BinanceIngestWatchStats,
+    raw_symbol: &str,
+    received_time_ms: TimestampMs,
+    expected_sequence_id: Sequence,
+    observed_sequence_id: Sequence,
+) {
+    stats.record_gap_alert(BinanceGapAlert {
+        gap_type: "sequence_gap".to_owned(),
+        symbol: raw_symbol.to_owned(),
+        detected_at_ms: received_time_ms,
+        expected_sequence_id: Some(expected_sequence_id),
+        observed_sequence_id: Some(observed_sequence_id),
+        heal_action: "refetch_snapshot".to_owned(),
+        heal_status: "resync_requested".to_owned(),
+    });
+}
+
+fn record_delta_parse_gap(
+    stats: &mut BinanceIngestWatchStats,
+    raw_symbol: &str,
+    received_time_ms: TimestampMs,
+    alert: BinanceGapAlert,
+) {
+    stats.record_gap_alert(BinanceGapAlert {
+        symbol: raw_symbol.to_owned(),
+        detected_at_ms: received_time_ms,
+        ..alert
+    });
+}
+
+fn record_snapshot_fetch_failure(
+    stats: &mut BinanceIngestWatchStats,
+    raw_symbol: &str,
+    received_time_ms: TimestampMs,
+    error: MarketDataError,
+) {
+    stats.depth_snapshot_failures += 1;
+    stats.record_gap_alert(BinanceGapAlert {
+        gap_type: "snapshot_fetch_failed".to_owned(),
+        symbol: raw_symbol.to_owned(),
+        detected_at_ms: received_time_ms,
+        expected_sequence_id: None,
+        observed_sequence_id: None,
+        heal_action: "retry_snapshot".to_owned(),
+        heal_status: format!("failed: {error}"),
+    });
 }
 
 async fn fetch_binance_depth_snapshot(
