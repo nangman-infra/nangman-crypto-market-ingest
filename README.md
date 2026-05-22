@@ -222,7 +222,7 @@ gap_alert.gap_type = snapshot_parse_failed: FixedDecimal 변환 실패
 ```bash
 # 서비스 상태
 aws ecs describe-services \
-  --profile AdministratorAccess-791444962214 \
+  --profile "${AWS_PROFILE}" \
   --region ap-northeast-2 \
   --cluster ecs-nangman-dev-invest-apn2 \
   --services svc-nangman-dev-crypto-market-ingest \
@@ -230,14 +230,14 @@ aws ecs describe-services \
 
 # 핵심 이벤트 필터링
 aws logs filter-log-events \
-  --profile AdministratorAccess-791444962214 \
+  --profile "${AWS_PROFILE}" \
   --region ap-northeast-2 \
   --log-group-name /ecs/nangman/dev/crypto-market-ingest \
   --filter-pattern 'market_backfill_done || market_normalize_finished || crypto_market_ingest_bootstrap_chunk_done || error || panic || SIGKILL || OutOfMemory'
 
 # 가장 최근 bootstrap marker 10개
 aws s3api list-objects-v2 \
-  --profile AdministratorAccess-791444962214 \
+  --profile "${AWS_PROFILE}" \
   --region ap-northeast-2 \
   --bucket nangman-crypto-dev-market-ingest-l1-962214 \
   --prefix supervisor/bootstrap/ \
@@ -270,15 +270,15 @@ setup 스크립트는 `/opt` 호스트 디렉터리 준비, IAM Roles Anywhere c
 PKI material은 별도. 서명 호스트에서 받아 다음 경로에 둔다.
 
 ```text
-/opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.791444962214.dev.pem
-/opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.791444962214.dev.key
+/opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.<account-id>.dev.pem
+/opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.<account-id>.dev.key
 ```
 
 ```bash
-scp signing-host:/secure/path/nangman-crypto-market-ingest.791444962214.dev.pem \
-  /opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.791444962214.dev.pem
-scp signing-host:/secure/path/nangman-crypto-market-ingest.791444962214.dev.key \
-  /opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.791444962214.dev.key
+scp signing-host:/secure/path/nangman-crypto-market-ingest.<account-id>.dev.pem \
+  /opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.<account-id>.dev.pem
+scp signing-host:/secure/path/nangman-crypto-market-ingest.<account-id>.dev.key \
+  /opt/nangman-crypto/infra/pki/nangman-crypto-market-ingest.<account-id>.dev.key
 
 cd /home/seongwon/nangman-crypto/apps/market-ingest-app
 ./scripts/setup-host.sh

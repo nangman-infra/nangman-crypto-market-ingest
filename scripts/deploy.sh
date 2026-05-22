@@ -49,7 +49,11 @@ load_env_file() {
   set +a
 
   AWS_REGION="${AWS_REGION:-ap-northeast-2}"
-  AWS_PROFILE="${AWS_PROFILE:-AdministratorAccess-791444962214}"
+  AWS_PROFILE="${AWS_PROFILE:-}"
+  if [[ -z "$AWS_PROFILE" || "$AWS_PROFILE" == *"<"* ]]; then
+    printf 'AWS_PROFILE must be set in %s or the shell before deploy\n' "$ENV_FILE" >&2
+    exit 1
+  fi
   export MARKET_L0_BUCKET="${MARKET_L0_BUCKET:-${L0_S3_BUCKET:-nangman-crypto-dev-market-ingest-l0-962214}}"
   export MARKET_L1_BUCKET="${MARKET_L1_BUCKET:-${L1_S3_BUCKET:-nangman-crypto-dev-market-ingest-l1-962214}}"
 }
