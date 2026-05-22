@@ -51,8 +51,9 @@ dev buckets:
   downstream handoff는 S3 `l1_index` success pointer이며, NATS pointer publisher가
   명시적으로 추가되기 전까지 이 앱의 NATS subject는 `none`이다.
 - bootstrap: realtime L0와 동시에 Binance 210일 historical L0를 UTC-day 청크로 채운다.
-- bootstrap 동안 live-priority normalize worker가 최신 닫힌 윈도우 1개를 계속 seed한다.
+- bootstrap 동안 live-priority-only normalize worker가 최신 닫힌 윈도우 1개를 계속 seed한다.
   이 경로는 downstream intel이 current `l1_index`를 기다리며 멈추지 않게 하기 위한 hot path다.
+  historical catch-up은 이 worker가 소비하지 않고 bootstrap scheduler가 담당한다.
 - 청크가 끝날 때마다 일회성 L1 normalize를 돌려 historical L1을 채운다.
 - 모든 bootstrap 청크가 끝나면 live-priority worker를 종료하고 full long-lived normalize worker로 전환한다.
 
@@ -82,7 +83,7 @@ dev buckets:
 
 ```text
 task start              → realtime + bootstrap scheduler 시작
-bootstrap active        → live-priority normalize worker 시작 (latest closed window, max 1)
+bootstrap active        → live-priority-only normalize worker 시작 (latest closed window, max 1)
 realtime worker exit    → supervisor가 ECS 재시작 유도 (non-zero exit)
 normalize worker exit   → supervisor가 bounded delay 후 재기동
 bootstrap L0 success    → success.json marker

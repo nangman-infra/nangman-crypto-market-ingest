@@ -124,7 +124,11 @@ pub(super) fn normalize_args(args: &SupervisorArgs) -> Vec<String> {
 
 pub(super) fn live_priority_normalize_args(args: &SupervisorArgs) -> Vec<String> {
     let mut values = normalize_args(args);
-    values.extend(["--max-windows-per-tick".to_owned(), "1".to_owned()]);
+    values.extend([
+        "--live-priority-only".to_owned(),
+        "--max-windows-per-tick".to_owned(),
+        "1".to_owned(),
+    ]);
     values
 }
 

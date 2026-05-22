@@ -673,6 +673,7 @@ mod tests {
         let values = live_priority_normalize_args(&args);
 
         assert!(values.iter().any(|value| value == "--live-priority"));
+        assert!(values.iter().any(|value| value == "--live-priority-only"));
         assert_eq!(
             values
                 .windows(2)

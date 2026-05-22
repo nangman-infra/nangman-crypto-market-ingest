@@ -144,9 +144,10 @@ historical bootstrap scheduler
 live-priority L1 normalize worker
 ```
 
-The live-priority worker seeds only the latest closed L1 window per tick. It
-keeps downstream intel from blocking on stale market context while the historical
-bootstrap scheduler fills older L0/L1 windows.
+The live-priority-only worker seeds only the latest closed L1 window per tick.
+It polls frequently enough to run after the watermark delay and never consumes
+historical catch-up work. It keeps downstream intel from blocking on stale market
+context while the historical bootstrap scheduler fills older L0/L1 windows.
 
 After bootstrap completes, the supervisor stops the live-priority worker and
 starts the full long-lived normalize worker.

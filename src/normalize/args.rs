@@ -44,6 +44,7 @@ pub struct NormalizeArgs {
     pub audit_l1_index_end_ms: Option<i64>,
     pub max_windows_per_tick: usize,
     pub live_priority: bool,
+    pub live_priority_only: bool,
     pub live_priority_lag_threshold_ms: i64,
     pub s3_retention_enabled: bool,
     pub l0_s3_retention_days: i64,
@@ -84,6 +85,7 @@ pub fn parse_args(
         audit_l1_index_end_ms: None,
         max_windows_per_tick: DEFAULT_MAX_WINDOWS_PER_TICK,
         live_priority: false,
+        live_priority_only: false,
         live_priority_lag_threshold_ms: DEFAULT_LIVE_PRIORITY_LAG_THRESHOLD_MS,
         s3_retention_enabled: true,
         l0_s3_retention_days: DEFAULT_L0_S3_RETENTION_DAYS,
@@ -182,6 +184,10 @@ pub fn parse_args(
             "--live-priority" => {
                 parsed.live_priority = true;
             }
+            "--live-priority-only" => {
+                parsed.live_priority = true;
+                parsed.live_priority_only = true;
+            }
             "--live-priority-lag-threshold-ms" => {
                 parsed.live_priority_lag_threshold_ms =
                     parse_positive_i64(args.next(), "--live-priority-lag-threshold-ms")?;
@@ -279,10 +285,13 @@ a producer execution id and is not used as an object coverage interval.
 input discovery. --live-priority processes the latest closed watermark window
 first when sequential catch-up lags by at least
 --live-priority-lag-threshold-ms, then continues the same tick with contiguous
-catch-up work. With an explicit range, BACKFILL mode is one-shot. --preflight
-and --audit-l1-index-* are also one-shot. S3 retention cleanup is app-owned for
-both L0 and L1 buckets in long-lived worker mode. L0 defaults to 45 days; L1
-defaults to 240 days. Bucket lifecycle remains only a fallback safety net."#
+catch-up work. --live-priority-only is for the supervisor bootstrap hot path:
+it seeds at most the latest closed watermark window and never consumes
+historical catch-up work. With an explicit range, BACKFILL mode is one-shot.
+--preflight and --audit-l1-index-* are also one-shot. S3 retention cleanup is
+app-owned for both L0 and L1 buckets in long-lived worker mode. L0 defaults to
+45 days; L1 defaults to 240 days. Bucket lifecycle remains only a fallback
+safety net."#
     );
 }
 
@@ -491,11 +500,13 @@ mod tests {
             "--l1-s3-bucket".to_owned(),
             "l1".to_owned(),
             "--live-priority".to_owned(),
+            "--live-priority-only".to_owned(),
             "--live-priority-lag-threshold-ms".to_owned(),
             "1800000".to_owned(),
         ];
         let parsed = parse_args(raw.into_iter()).unwrap().unwrap();
         assert!(parsed.live_priority);
+        assert!(parsed.live_priority_only);
         assert_eq!(parsed.live_priority_lag_threshold_ms, 1_800_000);
     }
 

@@ -70,6 +70,16 @@ async fn drain_ready_windows(
         oldest_l0_object_ms = None;
         now_ms = clock::now_ms();
     }
+    if args.live_priority_only {
+        log_stream::debug(
+            "market_normalize_live_priority_only_tick_finished",
+            json!({
+                "processed_windows": processed_windows,
+                "last_l1_success_end_ms": last_l1_success_end_ms
+            }),
+        )?;
+        return Ok(());
+    }
 
     loop {
         if shutdown.is_some_and(ShutdownHandle::is_requested) {
@@ -254,7 +264,7 @@ async fn run_normalize_worker(
 ) -> Result<(), Box<dyn Error>> {
     let mut shutdown = ShutdownHandle::install()?;
     let mut retention_handles = Some(spawn_s3_retention_loops(&args));
-    let sleep_duration = Duration::from_millis(u64::try_from(args.schedule_interval_ms)?);
+    let sleep_duration = worker_sleep_duration(&args)?;
     let mut now_ms = initial_now_ms;
     log_stream::info(
         "market_normalize_worker_started",
@@ -276,7 +286,7 @@ async fn run_normalize_worker(
         }
         log_stream::debug(
             "market_normalize_worker_sleep",
-            json!({ "sleep_ms": args.schedule_interval_ms }),
+            json!({ "sleep_ms": sleep_duration.as_millis() }),
         )?;
         if shutdown.sleep_or_requested(sleep_duration).await {
             log_stream::info(
@@ -288,6 +298,15 @@ async fn run_normalize_worker(
         }
         now_ms = clock::now_ms();
     }
+}
+
+fn worker_sleep_duration(args: &NormalizeArgs) -> Result<Duration, Box<dyn Error>> {
+    let sleep_ms = if args.live_priority_only {
+        args.schedule_interval_ms.min(60_000)
+    } else {
+        args.schedule_interval_ms
+    };
+    Ok(Duration::from_millis(u64::try_from(sleep_ms)?))
 }
 
 fn spawn_s3_retention_loops(args: &NormalizeArgs) -> Vec<JoinHandle<()>> {
@@ -606,6 +625,18 @@ async fn run_decision_body(
 mod tests {
     use super::*;
 
+    fn args() -> NormalizeArgs {
+        let raw = vec![
+            "--l0-s3-bucket".to_owned(),
+            "l0".to_owned(),
+            "--l1-s3-bucket".to_owned(),
+            "l1".to_owned(),
+        ];
+        crate::normalize::args::parse_args(raw.into_iter())
+            .unwrap()
+            .unwrap()
+    }
+
     #[test]
     fn audit_expected_keys_cover_every_window() {
         let keys = audit_expected_keys(
@@ -643,5 +674,26 @@ mod tests {
                 "l1_index/window_ms=1000/event_date=1970-01-01/hour=01/".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn worker_sleep_uses_configured_schedule_for_regular_worker() {
+        let mut args = args();
+        args.schedule_interval_ms = 900_000;
+
+        let duration = worker_sleep_duration(&args).unwrap();
+
+        assert_eq!(duration, Duration::from_millis(900_000));
+    }
+
+    #[test]
+    fn worker_sleep_caps_live_priority_only_worker_to_one_minute() {
+        let mut args = args();
+        args.schedule_interval_ms = 900_000;
+        args.live_priority_only = true;
+
+        let duration = worker_sleep_duration(&args).unwrap();
+
+        assert_eq!(duration, Duration::from_millis(60_000));
     }
 }
