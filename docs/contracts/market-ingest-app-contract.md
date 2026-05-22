@@ -50,6 +50,18 @@ The supervisor must receive real bucket names at runtime:
 The placeholder values shown above are public documentation placeholders. The
 binary rejects placeholder bucket names at runtime.
 
+When `readonlyRootFilesystem=true` is enabled for ECS hardening, the task
+definition must mount writable Fargate ephemeral volumes for:
+
+```text
+/opt/nangman-crypto/data/spool/market-ingest/l0
+/opt/nangman-crypto/data/spool/market-ingest/l1
+/opt/nangman-crypto/data/spool/market-normalize/catchup
+```
+
+These mounts are required for local L0 buffering, L1 output verification, and
+catch-up reads while keeping the rest of the container filesystem read-only.
+
 ## L0 Artifact Families
 
 L0 artifacts are written under the configured L0 bucket.

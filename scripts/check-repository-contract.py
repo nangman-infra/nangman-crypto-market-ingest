@@ -38,6 +38,11 @@ DIAGNOSE_L1_STALENESS_SCRIPT_PATH = SCRIPTS_DIR / "diagnose-l1-staleness.sh"
 CHECK_REPOSITORY_CONTRACT_SCRIPT_PATH = SCRIPTS_DIR / "check-repository-contract.py"
 CHECK_RELEASE_READINESS_SCRIPT_PATH = SCRIPTS_DIR / "check-release-readiness.sh"
 PREPARE_RELEASE_ARTIFACTS_SCRIPT_PATH = SCRIPTS_DIR / "prepare-release-artifacts.sh"
+REQUIRED_WRITABLE_MOUNT_POINTS = {
+    "market-l0-spool": "/opt/nangman-crypto/data/spool/market-ingest/l0",
+    "market-l1-spool": "/opt/nangman-crypto/data/spool/market-ingest/l1",
+    "market-normalize-catchup": "/opt/nangman-crypto/data/spool/market-normalize/catchup",
+}
 
 REQUIRED_PATHS = [
     README_PATH,
@@ -143,6 +148,28 @@ def check_task_definition_example(path: pathlib.Path) -> None:
     container = containers[0]
     if container.get("readonlyRootFilesystem") is not True:
         fail("ecs/task-definition.example.json container must use readonlyRootFilesystem=true")
+
+    volume_names = {
+        volume.get("name") for volume in task_definition.get("volumes", [])
+    }
+    mount_points = {
+        mount.get("sourceVolume"): mount
+        for mount in container.get("mountPoints", [])
+        if isinstance(mount, dict)
+    }
+    for volume_name, container_path in REQUIRED_WRITABLE_MOUNT_POINTS.items():
+        if volume_name not in volume_names:
+            fail(f"ecs/task-definition.example.json must define writable volume {volume_name}")
+        mount = mount_points.get(volume_name)
+        if not mount:
+            fail(f"ecs/task-definition.example.json must mount writable volume {volume_name}")
+        if mount.get("containerPath") != container_path:
+            fail(
+                "ecs/task-definition.example.json mount "
+                f"{volume_name} must target {container_path}"
+            )
+        if mount.get("readOnly") is not False:
+            fail(f"ecs/task-definition.example.json mount {volume_name} must be readOnly=false")
 
     container_user = (container.get("user") or "").strip().lower()
     if container_user in {"", "0", "0:0", "root", "root:root"}:

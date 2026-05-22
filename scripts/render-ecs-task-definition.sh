@@ -60,6 +60,34 @@ rendered = {
     for key in allowed_task_fields
     if key in task and task[key] not in (None, [], {})
 }
+required_writable_mounts = {
+    "market-l0-spool": "/opt/nangman-crypto/data/spool/market-ingest/l0",
+    "market-l1-spool": "/opt/nangman-crypto/data/spool/market-ingest/l1",
+    "market-normalize-catchup": "/opt/nangman-crypto/data/spool/market-normalize/catchup",
+}
+
+
+def ensure_volume(name):
+    volumes = rendered.setdefault("volumes", [])
+    if not any(volume.get("name") == name for volume in volumes):
+        volumes.append({"name": name})
+
+
+def ensure_mount(container, source_volume, container_path):
+    mount_points = container.setdefault("mountPoints", [])
+    for mount in mount_points:
+        if mount.get("sourceVolume") == source_volume or mount.get("containerPath") == container_path:
+            mount["sourceVolume"] = source_volume
+            mount["containerPath"] = container_path
+            mount["readOnly"] = False
+            return
+    mount_points.append(
+        {
+            "sourceVolume": source_volume,
+            "containerPath": container_path,
+            "readOnly": False,
+        }
+    )
 
 platform = rendered.get("runtimePlatform", {})
 if platform.get("cpuArchitecture") != "ARM64":
@@ -77,6 +105,9 @@ if image_uri:
 
 container["readonlyRootFilesystem"] = True
 container["user"] = "nonroot:nonroot"
+for source_volume, container_path in required_writable_mounts.items():
+    ensure_volume(source_volume)
+    ensure_mount(container, source_volume, container_path)
 
 linux_parameters = container.setdefault("linuxParameters", {})
 capabilities = linux_parameters.setdefault("capabilities", {})
@@ -132,6 +163,14 @@ assert container["image"] == "new-image"
 assert container["readonlyRootFilesystem"] is True
 assert container["user"] == "nonroot:nonroot"
 assert "ALL" in container["linuxParameters"]["capabilities"]["drop"]
+volumes = {volume["name"] for volume in data["volumes"]}
+mounts = {
+    mount["sourceVolume"]: mount
+    for mount in container["mountPoints"]
+}
+for volume in ["market-l0-spool", "market-l1-spool", "market-normalize-catchup"]:
+    assert volume in volumes
+    assert mounts[volume]["readOnly"] is False
 PY
   log "render-ecs-task-definition self-test passed"
 }
