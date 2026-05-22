@@ -211,6 +211,7 @@ async fn run_binance(args: Args) -> Result<(), Box<dyn Error>> {
         config_dir: args.config_dir.display().to_string(),
         rest_base_url,
         futures_rest_base_url: args.binance_futures_rest_base_url,
+        derivative_snapshot_interval_seconds: args.binance_derivatives_snapshot_interval_seconds,
         stream_config: market_stream_config,
         markets,
         duration_seconds: args.duration_seconds,

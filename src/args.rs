@@ -5,6 +5,7 @@ const DEFAULT_CONFIG_DIR: &str = "/opt/nangman-crypto/strategies/crypto/rust-eng
 const DEFAULT_L0_SPOOL_ROOT: &str = "/opt/nangman-crypto/data/spool/market-ingest/l0";
 const DEFAULT_AWS_REGION: &str = "ap-northeast-2";
 const DEFAULT_BINANCE_FUTURES_REST_BASE_URL: &str = "https://fapi.binance.com";
+const DEFAULT_BINANCE_DERIVATIVES_SNAPSHOT_INTERVAL_SECONDS: u64 = 300;
 const DEFAULT_HIGH_WATER_PCT: u8 = 70;
 const DEFAULT_EMERGENCY_PCT: u8 = 90;
 const DEFAULT_SAFETY_FLOOR_HOURS: i64 = 2;
@@ -23,6 +24,7 @@ pub struct Args {
     pub expect_symbol_count: usize,
     pub allow_partial_symbol_coverage: bool,
     pub binance_futures_rest_base_url: String,
+    pub binance_derivatives_snapshot_interval_seconds: u64,
     pub upbit_rest_base_url: Option<String>,
     pub upbit_websocket_url: Option<String>,
     pub upbit_quote_currency: String,
@@ -59,6 +61,8 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>
         expect_symbol_count: 50,
         allow_partial_symbol_coverage: false,
         binance_futures_rest_base_url: DEFAULT_BINANCE_FUTURES_REST_BASE_URL.to_owned(),
+        binance_derivatives_snapshot_interval_seconds:
+            DEFAULT_BINANCE_DERIVATIVES_SNAPSHOT_INTERVAL_SECONDS,
         upbit_rest_base_url: None,
         upbit_websocket_url: None,
         upbit_quote_currency: "KRW".to_owned(),
@@ -123,6 +127,14 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>
                 parsed.binance_futures_rest_base_url = args
                     .next()
                     .ok_or("--binance-futures-rest-base-url requires an absolute HTTPS URL")?;
+            }
+            "--binance-derivatives-snapshot-interval-seconds" => {
+                parsed.binance_derivatives_snapshot_interval_seconds = parse_positive_u64(
+                    args.next().ok_or(
+                        "--binance-derivatives-snapshot-interval-seconds requires a positive integer",
+                    )?,
+                    "--binance-derivatives-snapshot-interval-seconds",
+                )?;
             }
             "--upbit-rest-base-url" => {
                 parsed.upbit_rest_base_url = Some(
@@ -344,6 +356,7 @@ pub fn print_help() {
              --log-interval-seconds 5 \\\n\
              --depth-snapshot-limit 100 \\\n\
              --binance-futures-rest-base-url https://fapi.binance.com \\\n\
+             --binance-derivatives-snapshot-interval-seconds 300 \\\n\
              --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-<account-suffix>\n\
           cargo run --manifest-path /opt/nangman-crypto/apps/market-ingest-app/Cargo.toml -- \\\n\
              --venue upbit \\\n\
@@ -384,6 +397,7 @@ mod tests {
             parsed.binance_futures_rest_base_url,
             "https://fapi.binance.com"
         );
+        assert_eq!(parsed.binance_derivatives_snapshot_interval_seconds, 300);
     }
 
     #[test]
@@ -424,6 +438,8 @@ mod tests {
         raw.push("--s3-retention-max-deletes-per-run".to_owned());
         raw.push("50".to_owned());
         raw.push("--disable-s3-retention".to_owned());
+        raw.push("--binance-derivatives-snapshot-interval-seconds".to_owned());
+        raw.push("120".to_owned());
         let parsed = parse_args(raw.into_iter()).unwrap().unwrap();
         assert_eq!(parsed.local_disk_high_water_pct, 60);
         assert_eq!(parsed.local_disk_emergency_pct, 85);
@@ -433,6 +449,7 @@ mod tests {
         assert_eq!(parsed.s3_retention_check_interval_secs, 3600);
         assert_eq!(parsed.s3_retention_max_deletes_per_run, 50);
         assert!(!parsed.s3_retention_enabled);
+        assert_eq!(parsed.binance_derivatives_snapshot_interval_seconds, 120);
     }
 
     #[test]

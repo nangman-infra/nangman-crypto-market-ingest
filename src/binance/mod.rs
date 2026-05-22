@@ -28,6 +28,7 @@ pub struct BinanceRunConfig {
     pub config_dir: String,
     pub rest_base_url: String,
     pub futures_rest_base_url: String,
+    pub derivative_snapshot_interval_seconds: u64,
     pub stream_config: BinanceStreamConfig,
     pub markets: Vec<BinanceMarket>,
     pub duration_seconds: u64,
@@ -168,13 +169,17 @@ pub async fn run_binance_l0_smoke(config: BinanceRunConfig) -> Result<(), Binanc
         0
     };
     let derivative_snapshot_report = if let Some(sink) = storage_sink.as_mut() {
-        derivatives::append_derivative_snapshots(
+        let report = derivatives::append_derivative_snapshots(
             &config.futures_rest_base_url,
             &config.markets,
             clock::now_ms(),
             sink,
         )
-        .await?
+        .await?;
+        sink.flush_all()
+            .await
+            .map_err(|error| BinanceIngestError::Storage(error.to_string()))?;
+        report
     } else {
         derivatives::BinanceDerivativeSnapshotReport::default()
     };
@@ -183,8 +188,14 @@ pub async fn run_binance_l0_smoke(config: BinanceRunConfig) -> Result<(), Binanc
         &config.stream_config,
         &config.markets,
         &config.stream_kinds,
-        Duration::from_secs(config.duration_seconds),
-        Duration::from_secs(config.log_interval_seconds),
+        ws::BinanceL0WatchConfig {
+            duration: Duration::from_secs(config.duration_seconds),
+            log_interval: Duration::from_secs(config.log_interval_seconds),
+            derivative_snapshot_interval: Duration::from_secs(
+                config.derivative_snapshot_interval_seconds,
+            ),
+            futures_rest_base_url: &config.futures_rest_base_url,
+        },
         storage_sink.as_mut(),
         print_binance_ingest_log,
     )

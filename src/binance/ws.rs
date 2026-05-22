@@ -1,7 +1,9 @@
+use super::derivatives;
 use super::events::{BinanceParsedEnvelope, parse_binance_payload};
 use super::stats::{BinanceL0GapAlert, BinanceL0WatchStats};
 use super::{BinanceIngestError, BinanceMarket};
 use crate::clock;
+use crate::log_stream;
 use crate::reconnect::ReconnectPolicy;
 use crate::shutdown::ShutdownListener;
 use crate::storage::L0StorageSink;
@@ -38,14 +40,22 @@ struct SessionTimers {
     last_message_at: Instant,
     log_interval: Duration,
     stale_timeout: Duration,
+    derivative_snapshot_interval: Duration,
+    next_derivative_snapshot_at: Instant,
 }
 
-pub async fn watch_binance_l0_streams(
+pub(super) struct BinanceL0WatchConfig<'a> {
+    pub(super) duration: Duration,
+    pub(super) log_interval: Duration,
+    pub(super) derivative_snapshot_interval: Duration,
+    pub(super) futures_rest_base_url: &'a str,
+}
+
+pub(super) async fn watch_binance_l0_streams(
     stream_config: &BinanceStreamConfig,
     markets: &[BinanceMarket],
     stream_kinds: &[BinanceStreamKind],
-    duration: Duration,
-    log_interval: Duration,
+    runtime: BinanceL0WatchConfig<'_>,
     mut storage: Option<&mut L0StorageSink>,
     log_callback: impl Fn(&BinanceL0WatchStats),
 ) -> Result<BinanceL0WatchStats, BinanceIngestError> {
@@ -64,7 +74,7 @@ pub async fn watch_binance_l0_streams(
 
     let policy = ReconnectPolicy::default_24x7();
     let mut current_backoff = policy.initial_backoff;
-    let deadline = Instant::now() + duration;
+    let deadline = Instant::now() + runtime.duration;
 
     loop {
         if shutdown_flag.load(Ordering::SeqCst) {
@@ -93,8 +103,11 @@ pub async fn watch_binance_l0_streams(
             &mut stats,
             storage.as_deref_mut(),
             &markets_by_raw,
+            markets,
             deadline,
-            log_interval,
+            runtime.log_interval,
+            runtime.derivative_snapshot_interval,
+            runtime.futures_rest_base_url,
             policy.stale_message_timeout,
             &log_callback,
             &shutdown_flag,
@@ -175,8 +188,11 @@ async fn run_session(
     stats: &mut BinanceL0WatchStats,
     mut storage: Option<&mut L0StorageSink>,
     markets_by_raw: &HashMap<String, BinanceMarket>,
+    markets: &[BinanceMarket],
     deadline: Instant,
     log_interval: Duration,
+    derivative_snapshot_interval: Duration,
+    futures_rest_base_url: &str,
     stale_timeout: Duration,
     log_callback: &impl Fn(&BinanceL0WatchStats),
     shutdown_flag: &Arc<AtomicBool>,
@@ -188,6 +204,8 @@ async fn run_session(
         last_message_at: now,
         log_interval,
         stale_timeout,
+        derivative_snapshot_interval,
+        next_derivative_snapshot_at: now + derivative_snapshot_interval,
     };
 
     loop {
@@ -217,7 +235,16 @@ async fn run_session(
             SessionPoll::Tick => {}
         }
 
-        if let Some(end) = run_housekeeping(&mut websocket, stats, &mut timers, log_callback).await
+        if let Some(end) = run_housekeeping(
+            &mut websocket,
+            stats,
+            storage.as_deref_mut(),
+            markets,
+            futures_rest_base_url,
+            &mut timers,
+            log_callback,
+        )
+        .await
         {
             return Ok(end);
         }
@@ -231,6 +258,7 @@ fn next_session_tick(deadline: Instant, timers: &SessionTimers, now: Instant) ->
         deadline,
         timers.next_log_at,
         timers.next_ping_at,
+        timers.next_derivative_snapshot_at,
         stale_at,
         poll_tick,
     ]
@@ -254,6 +282,9 @@ async fn poll_session(
 async fn run_housekeeping(
     websocket: &mut Websocket,
     stats: &mut BinanceL0WatchStats,
+    storage: Option<&mut L0StorageSink>,
+    markets: &[BinanceMarket],
+    futures_rest_base_url: &str,
     timers: &mut SessionTimers,
     log_callback: &impl Fn(&BinanceL0WatchStats),
 ) -> Option<SessionEnd> {
@@ -272,7 +303,62 @@ async fn run_housekeeping(
         log_callback(stats);
         timers.next_log_at += timers.log_interval;
     }
+    if now >= timers.next_derivative_snapshot_at {
+        if let Some(sink) = storage {
+            append_and_flush_derivative_snapshots(futures_rest_base_url, markets, sink).await;
+        }
+        timers.next_derivative_snapshot_at += timers.derivative_snapshot_interval;
+        while timers.next_derivative_snapshot_at <= Instant::now() {
+            timers.next_derivative_snapshot_at += timers.derivative_snapshot_interval;
+        }
+    }
     None
+}
+
+async fn append_and_flush_derivative_snapshots(
+    futures_rest_base_url: &str,
+    markets: &[BinanceMarket],
+    sink: &mut L0StorageSink,
+) {
+    match derivatives::append_derivative_snapshots(
+        futures_rest_base_url,
+        markets,
+        clock::now_ms(),
+        sink,
+    )
+    .await
+    {
+        Ok(report) => match sink.flush_all().await {
+            Ok(()) => {
+                let _ = log_stream::info(
+                    "market_ingest_binance_derivative_snapshot_published",
+                    serde_json::json!({
+                        "funding_rate_snapshot_records": report.funding_rate_snapshot_records,
+                        "open_interest_snapshot_records": report.open_interest_snapshot_records,
+                        "derivative_snapshot_records": report.total_records(),
+                        "unsupported_futures_symbol_count": report.unsupported_futures_symbol_count,
+                        "failure_count": report.failure_count,
+                    }),
+                );
+            }
+            Err(error) => {
+                let _ = log_stream::warn(
+                    "market_ingest_binance_derivative_snapshot_flush_failed",
+                    serde_json::json!({
+                        "error": error.to_string()
+                    }),
+                );
+            }
+        },
+        Err(error) => {
+            let _ = log_stream::warn(
+                "market_ingest_binance_derivative_snapshot_publish_failed",
+                serde_json::json!({
+                    "error": error.to_string()
+                }),
+            );
+        }
+    }
 }
 
 async fn send_ping(websocket: &mut Websocket) -> Result<(), tungstenite::Error> {
