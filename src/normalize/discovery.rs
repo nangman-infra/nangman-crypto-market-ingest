@@ -5,7 +5,7 @@ use crate::storage::StorageError;
 use crate::storage::s3_upload::S3Uploader;
 use chrono::{DateTime, Timelike, Utc};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const HOUR_MS: i64 = 3_600_000;
 const MAX_L1_POINTER_LOOKBACK_HOURS: i64 = 24 * 90;
@@ -35,7 +35,9 @@ pub(super) async fn resolve_last_l1_success_end_ms(
         );
 
         for pointer_key in pointer_keys {
-            if let Some(end_ms) = success_end_ms_from_pointer(&uploader, &pointer_key).await? {
+            if let Some(end_ms) =
+                success_end_ms_from_pointer(&uploader, &args.catchup_tmp_root, &pointer_key).await?
+            {
                 return Ok(Some(end_ms));
             }
         }
@@ -78,9 +80,10 @@ pub(super) async fn resolve_oldest_l0_object_ms(
 
 async fn success_end_ms_from_pointer(
     uploader: &S3Uploader,
+    tmp_root: &Path,
     pointer_key: &str,
 ) -> Result<Option<i64>, StorageError> {
-    let pointer = download_json_value(uploader, pointer_key, "pointer").await?;
+    let pointer = download_json_value(uploader, tmp_root, pointer_key, "pointer").await?;
     if !json_status_success(&pointer) {
         return Ok(None);
     }
@@ -93,7 +96,7 @@ async fn success_end_ms_from_pointer(
         return Ok(None);
     };
 
-    let manifest = download_json_value(uploader, manifest_key, "manifest").await?;
+    let manifest = download_json_value(uploader, tmp_root, manifest_key, "manifest").await?;
     if !json_status_success(&manifest) {
         return Ok(None);
     }
@@ -103,10 +106,14 @@ async fn success_end_ms_from_pointer(
 
 async fn download_json_value(
     uploader: &S3Uploader,
+    tmp_root: &Path,
     key: &str,
     label: &str,
 ) -> Result<Value, StorageError> {
-    let tmp_path = temporary_json_path(label);
+    let tmp_path = temporary_json_path(tmp_root, label);
+    if let Some(parent) = tmp_path.parent() {
+        std::fs::create_dir_all(parent).map_err(StorageError::Io)?;
+    }
     uploader.download_file(key, &tmp_path).await?;
     let bytes = match std::fs::read(&tmp_path) {
         Ok(value) => value,
@@ -181,8 +188,8 @@ fn floor_hour_ms(value: i64) -> i64 {
     value.div_euclid(HOUR_MS) * HOUR_MS
 }
 
-fn temporary_json_path(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
+fn temporary_json_path(tmp_root: &Path, label: &str) -> PathBuf {
+    tmp_root.join("_l1_pointer_lookup").join(format!(
         "market-normalize-{label}-{}-{}",
         std::process::id(),
         nanos_now()
@@ -272,5 +279,17 @@ mod tests {
             Some(900_000)
         );
         assert_eq!(input_time_range_end_ms(&json!({})), None);
+    }
+
+    #[test]
+    fn temporary_json_path_uses_configured_tmp_root() {
+        let path = temporary_json_path(Path::new("/opt/nangman-crypto/tmp"), "pointer");
+
+        assert!(path.starts_with("/opt/nangman-crypto/tmp/_l1_pointer_lookup"));
+        assert!(
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.starts_with("market-normalize-pointer-"))
+        );
     }
 }
