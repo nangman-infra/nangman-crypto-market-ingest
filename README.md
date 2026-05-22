@@ -167,7 +167,7 @@ REPAIR   - audit 또는 missing pointer 보강
 REPORT   - 모든 모드에서 manifest/report 출력
 ```
 
-`MARKET_NORMALIZE_MAX_LATENCY_MS`로 valid 이벤트의 `quality_delayed` 컷오프를 조정한다. `--l0-run-key-overlap-ms`(supervisor default 360_000 ms)는 hourly S3 listing 후 사용하는 conservative L0 run-id timestamp 필터다.
+`MARKET_NORMALIZE_MAX_LATENCY_MS`로 valid 이벤트의 `quality_delayed` 컷오프를 조정한다. L1 입력 선택은 L0 `event_date/hour` partition을 기준으로 후보 Parquet을 모으고, 실제 포함 여부는 각 row의 `exchange_timestamp_ms`로 결정한다. `run_id`는 producer 실행 식별자라서 장기 실행 worker의 시간 범위로 해석하지 않는다.
 
 **Downstream consumer 규칙**: arbitrary L1 prefix listing 금지. 항상 success pointer 경로로 read.
 

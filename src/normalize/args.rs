@@ -272,15 +272,17 @@ Each tick decides LIVE / CATCH-UP from the most recent successful L1 manifest
 and the watermark, then processes up to --max-windows-per-tick contiguous
 windows before sleeping for --schedule-interval-ms. Events with
 ingest_timestamp_ms - exchange_timestamp_ms greater than --max-latency-ms are
-counted as delayed. L0 object keys are filtered by run_id timestamp using
---l0-run-key-overlap-ms; keep this value greater than or equal to the L0 ingest
-duration to avoid dropping boundary files. --live-priority processes the latest
-closed watermark window first when sequential catch-up lags by at least
+counted as delayed. L0 object candidates are selected from event_date/hour
+partitions; row exchange_timestamp_ms performs the exact time filter. run_id is
+a producer execution id and is not used as an object coverage interval.
+--l0-run-key-overlap-ms is accepted for compatibility but ignored by current
+input discovery. --live-priority processes the latest closed watermark window
+first when sequential catch-up lags by at least
 --live-priority-lag-threshold-ms, then continues the same tick with contiguous
 catch-up work. With an explicit range, BACKFILL mode is one-shot. --preflight
-and --audit-l1-index-* are also one-shot. S3 retention cleanup is app-owned
-for both L0 and L1 buckets in long-lived worker mode. L0 defaults to 45 days;
-L1 defaults to 240 days. Bucket lifecycle remains only a fallback safety net."#
+and --audit-l1-index-* are also one-shot. S3 retention cleanup is app-owned for
+both L0 and L1 buckets in long-lived worker mode. L0 defaults to 45 days; L1
+defaults to 240 days. Bucket lifecycle remains only a fallback safety net."#
     );
 }
 

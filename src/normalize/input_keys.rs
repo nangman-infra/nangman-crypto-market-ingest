@@ -19,7 +19,6 @@ pub(crate) const RAW_EVENT_TYPES: &[&str] = &[
     "open_interest_snapshot",
 ];
 const GAP_ALERT_TYPES: &[&str] = &["depth_update_id_gap", "ordering_violation", "upbit_error"];
-const RUN_ID_PREFIX: &str = "run_id=market-ingest-";
 
 #[derive(Debug, Clone)]
 pub(crate) struct InputEntry {
@@ -39,14 +38,14 @@ pub(crate) async fn collect_input_entries(
     l0_local_root: &Path,
     range: InputRange,
     run_mode: RunMode,
-    l0_run_key_overlap_ms: i64,
+    _l0_run_key_overlap_ms: i64,
 ) -> Result<Vec<InputEntry>, StorageError> {
     let local_entries = if matches!(run_mode, RunMode::Live) {
-        local_input_entries(l0_local_root, range, l0_run_key_overlap_ms)?
+        local_input_entries(l0_local_root, range)?
     } else {
         Vec::new()
     };
-    let s3_keys = s3_input_keys(s3, range, l0_run_key_overlap_ms).await?;
+    let s3_keys = s3_input_keys(s3, range).await?;
     Ok(merge_entries(local_entries, s3_keys))
 }
 
@@ -65,11 +64,7 @@ fn merge_entries(local_entries: Vec<InputEntry>, s3_keys: Vec<String>) -> Vec<In
     entries.into_values().collect()
 }
 
-async fn s3_input_keys(
-    s3: &S3Uploader,
-    range: InputRange,
-    l0_run_key_overlap_ms: i64,
-) -> Result<Vec<String>, StorageError> {
+async fn s3_input_keys(s3: &S3Uploader, range: InputRange) -> Result<Vec<String>, StorageError> {
     let mut keys = BTreeSet::new();
     let parts = hourly_parts(range.start_ms, range.end_ms);
     for part in &parts {
@@ -81,8 +76,6 @@ async fn s3_input_keys(
                         "raw_market_event/venue={venue}/event_type={event_type}/event_date={}/hour={:02}/",
                         part.event_date, part.hour
                     ),
-                    range,
-                    l0_run_key_overlap_ms,
                     &mut keys,
                 )
                 .await?;
@@ -93,8 +86,6 @@ async fn s3_input_keys(
                     "symbol_health/venue={venue}/event_date={}/hour={:02}/",
                     part.event_date, part.hour
                 ),
-                range,
-                l0_run_key_overlap_ms,
                 &mut keys,
             )
             .await?;
@@ -104,8 +95,6 @@ async fn s3_input_keys(
                     "source_health/venue={venue}/event_date={}/hour={:02}/",
                     part.event_date, part.hour
                 ),
-                range,
-                l0_run_key_overlap_ms,
                 &mut keys,
             )
             .await?;
@@ -116,8 +105,6 @@ async fn s3_input_keys(
                         "gap_alert/venue={venue}/gap_type={gap_type}/event_date={}/hour={:02}/",
                         part.event_date, part.hour
                     ),
-                    range,
-                    l0_run_key_overlap_ms,
                     &mut keys,
                 )
                 .await?;
@@ -128,20 +115,14 @@ async fn s3_input_keys(
     Ok(keys.into_iter().collect())
 }
 
-fn local_input_entries(
-    root: &Path,
-    range: InputRange,
-    l0_run_key_overlap_ms: i64,
-) -> Result<Vec<InputEntry>, StorageError> {
+fn local_input_entries(root: &Path, range: InputRange) -> Result<Vec<InputEntry>, StorageError> {
     let parts = hourly_parts(range.start_ms, range.end_ms);
     let mut entries = BTreeMap::new();
     for path in parquet_files_under(root)? {
         let Some(key) = key_from_local_path(root, &path) else {
             continue;
         };
-        if key_matches_parts(&key, &parts)
-            && key_matches_run_range(&key, range, l0_run_key_overlap_ms)
-        {
+        if key_matches_parts(&key, &parts) {
             entries.insert(
                 key.clone(),
                 InputEntry {
@@ -158,8 +139,6 @@ fn local_input_entries(
 async fn list_into(
     s3: &S3Uploader,
     prefix: &str,
-    range: InputRange,
-    l0_run_key_overlap_ms: i64,
     keys: &mut BTreeSet<String>,
 ) -> Result<(), StorageError> {
     let _ = log_stream::debug(
@@ -173,16 +152,11 @@ async fn list_into(
     let listed_key_count = listed_keys.len();
     let mut parquet_key_count = 0_usize;
     let mut selected_key_count = 0_usize;
-    let mut dropped_by_run_range_count = 0_usize;
     for key in listed_keys {
         if key.ends_with(".parquet") {
             parquet_key_count += 1;
-            if key_matches_run_range(&key, range, l0_run_key_overlap_ms) {
-                selected_key_count += 1;
-                keys.insert(key);
-            } else {
-                dropped_by_run_range_count += 1;
-            }
+            selected_key_count += 1;
+            keys.insert(key);
         }
     }
     let _ = log_stream::debug(
@@ -192,11 +166,7 @@ async fn list_into(
             "prefix": prefix,
             "listed_key_count": listed_key_count,
             "parquet_key_count": parquet_key_count,
-            "selected_key_count": selected_key_count,
-            "dropped_by_run_range_count": dropped_by_run_range_count,
-            "range_start_ms": range.start_ms,
-            "range_end_ms": range.end_ms,
-            "l0_run_key_overlap_ms": l0_run_key_overlap_ms
+            "selected_key_count": selected_key_count
         }),
     );
     Ok(())
@@ -233,22 +203,6 @@ fn key_matches_parts(key: &str, parts: &[HourPart]) -> bool {
                 part.event_date, part.hour
             ))
         })
-}
-
-fn key_matches_run_range(key: &str, range: InputRange, l0_run_key_overlap_ms: i64) -> bool {
-    let Some(run_start_ms) = run_start_ms_from_key(key) else {
-        return true;
-    };
-    let run_end_ms = run_start_ms.saturating_add(l0_run_key_overlap_ms);
-    run_end_ms >= range.start_ms && run_start_ms < range.end_ms
-}
-
-fn run_start_ms_from_key(key: &str) -> Option<i64> {
-    let marker_start = key.find(RUN_ID_PREFIX)? + RUN_ID_PREFIX.len();
-    let marker_end = key[marker_start..].find("-part-")? + marker_start;
-    let run_id = &key[marker_start..marker_end];
-    let seconds = run_id.rsplit('-').next()?.parse::<i64>().ok()?;
-    seconds.checked_mul(1000)
 }
 
 fn key_from_local_path(root: &Path, path: &Path) -> Option<String> {
@@ -349,37 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn extracts_l0_run_start_ms_from_object_key() {
-        let key = "source_health/venue=binance/event_date=2026-05-05/hour=13/shard=00/run_id=market-ingest-binance-1777986350-part-000001.parquet";
+    fn long_running_market_ingest_run_ids_are_kept_by_hour_partition() {
+        let key = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-22/hour=17/shard=00/run_id=market-ingest-binance-1779471443-part-000101.parquet";
+        let parts = hourly_parts(1_779_471_000_000, 1_779_471_900_000);
 
-        assert_eq!(run_start_ms_from_key(key), Some(1_777_986_350_000));
-    }
-
-    #[test]
-    fn keeps_unparseable_run_keys_for_safety() {
-        let key = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-05/hour=13/shard=00/run_id=legacy-run-part-000001.parquet";
-        let range = InputRange {
-            start_ms: 1_777_986_900_000,
-            end_ms: 1_777_987_800_000,
-        };
-
-        assert!(key_matches_run_range(key, range, 360_000));
-    }
-
-    #[test]
-    fn filters_l0_run_keys_by_conservative_overlap() {
-        let range = InputRange {
-            start_ms: 1_777_986_900_000,
-            end_ms: 1_777_987_800_000,
-        };
-        let overlaps_start = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-05/hour=13/shard=00/run_id=market-ingest-binance-1777986600-part-000001.parquet";
-        let inside = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-05/hour=13/shard=00/run_id=market-ingest-binance-1777987000-part-000001.parquet";
-        let before = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-05/hour=13/shard=00/run_id=market-ingest-binance-1777986200-part-000001.parquet";
-        let after = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-05/hour=13/shard=00/run_id=market-ingest-binance-1777987800-part-000001.parquet";
-
-        assert!(key_matches_run_range(overlaps_start, range, 360_000));
-        assert!(key_matches_run_range(inside, range, 360_000));
-        assert!(!key_matches_run_range(before, range, 360_000));
-        assert!(!key_matches_run_range(after, range, 360_000));
+        assert!(key_matches_parts(key, &parts));
     }
 }
