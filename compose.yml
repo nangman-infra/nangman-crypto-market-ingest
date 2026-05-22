@@ -4,6 +4,9 @@ x-market-ingest-common: &market-ingest-common
   build:
     context: ${MARKET_INGEST_REPO_ROOT:-.}
     dockerfile: ${MARKET_INGEST_REPO_ROOT:-.}/Dockerfile
+    args:
+      NANGMAN_GIT_SHA: ${NANGMAN_GIT_SHA:-unknown}
+      NANGMAN_GIT_DIRTY: ${NANGMAN_GIT_DIRTY:-true}
   image: nangman-crypto-market-ingest-app:dev
   restart: unless-stopped
   environment:
@@ -38,7 +41,7 @@ services:
       - ${MARKET_INGEST_EXPECT_SYMBOL_COUNT:-50}
       - --allow-partial-symbol-coverage
       - --l0-s3-bucket
-      - ${MARKET_L0_BUCKET:-nangman-crypto-dev-market-ingest-l0-962214}
+      - ${MARKET_L0_BUCKET:?MARKET_L0_BUCKET is required}
       - --aws-profile
       - ${AWS_PROFILE:-market-ingest-roles-anywhere}
       - --aws-region
@@ -63,11 +66,11 @@ services:
       - /usr/local/bin/market-normalize
     command:
       - --l0-s3-bucket
-      - ${MARKET_L0_BUCKET:-nangman-crypto-dev-market-ingest-l0-962214}
+      - ${MARKET_L0_BUCKET:?MARKET_L0_BUCKET is required}
       - --l0-local-root
       - /opt/nangman-crypto/data/spool/market-ingest/l0
       - --l1-s3-bucket
-      - ${MARKET_L1_BUCKET:-nangman-crypto-dev-market-ingest-l1-962214}
+      - ${MARKET_L1_BUCKET:?MARKET_L1_BUCKET is required}
       - --aws-profile
       - ${AWS_PROFILE:-market-ingest-roles-anywhere}
       - --aws-region
@@ -112,7 +115,7 @@ services:
       - --upbit-orderbook-unit
       - ${UPBIT_ORDERBOOK_UNIT:-5}
       - --l0-s3-bucket
-      - ${MARKET_L0_BUCKET:-nangman-crypto-dev-market-ingest-l0-962214}
+      - ${MARKET_L0_BUCKET:?MARKET_L0_BUCKET is required}
       - --aws-profile
       - ${AWS_PROFILE:-market-ingest-roles-anywhere}
       - --aws-region

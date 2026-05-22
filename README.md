@@ -8,7 +8,7 @@
 - **L1**: 1초 단위 `normalized_market_slice` + success-only index pointer.
 - private API, account credential, AI hot-path 결정, 주문 경로는 사용하지 않는다.
 
-상세 계약은 [`docs/contracts/10-data/market-ingest-app-contract.md`](../../docs/contracts/10-data/market-ingest-app-contract.md)가 source of truth다.
+상세 계약은 [`docs/contracts/market-ingest-app-contract.md`](docs/contracts/market-ingest-app-contract.md)가 source of truth다.
 
 ---
 
@@ -41,15 +41,20 @@ image:       ecr-nangman-dev-crypto-market-ingest-apn2
 logs:        /ecs/nangman/dev/crypto-market-ingest
 
 dev buckets:
-  L0 = nangman-crypto-dev-market-ingest-l0-962214  (retention 45d)
-  L1 = nangman-crypto-dev-market-ingest-l1-962214  (retention 240d)
+  L0 = nangman-crypto-dev-market-ingest-l0-<account-suffix>  (retention 45d)
+  L1 = nangman-crypto-dev-market-ingest-l1-<account-suffix>  (retention 240d)
 ```
 
 - compute layer는 stateless. ECS 재시작·Fargate Spot interruption·deploy restart 모두 안전.
   진행 상황은 S3 marker와 L1 success pointer에서 복구한다.
+- market-ingest-app은 현재 NATS subject를 직접 publish하지 않는다.
+  downstream handoff는 S3 `l1_index` success pointer이며, NATS pointer publisher가
+  명시적으로 추가되기 전까지 이 앱의 NATS subject는 `none`이다.
 - bootstrap: realtime L0와 동시에 Binance 210일 historical L0를 UTC-day 청크로 채운다.
-- bootstrap 동안 long-lived normalize는 대기하고, 청크가 끝날 때마다 일회성 L1 normalize를 돌린다.
-- 모든 bootstrap 청크가 끝나면 long-lived normalize worker가 시작된다.
+- bootstrap 동안 live-priority normalize worker가 최신 닫힌 윈도우 1개를 계속 seed한다.
+  이 경로는 downstream intel이 current `l1_index`를 기다리며 멈추지 않게 하기 위한 hot path다.
+- 청크가 끝날 때마다 일회성 L1 normalize를 돌려 historical L1을 채운다.
+- 모든 bootstrap 청크가 끝나면 live-priority worker를 종료하고 full long-lived normalize worker로 전환한다.
 
 ---
 
@@ -77,11 +82,12 @@ dev buckets:
 
 ```text
 task start              → realtime + bootstrap scheduler 시작
+bootstrap active        → live-priority normalize worker 시작 (latest closed window, max 1)
 realtime worker exit    → supervisor가 ECS 재시작 유도 (non-zero exit)
 normalize worker exit   → supervisor가 bounded delay 후 재기동
 bootstrap L0 success    → success.json marker
 bootstrap L1 success    → complete.json marker → 다음 청크
-bootstrap 전체 완료     → long-lived normalize worker 시작
+bootstrap 전체 완료     → full long-lived normalize worker로 전환
 SIGTERM                 → graceful shutdown (모든 buffer flush + manifest upload)
 ```
 
@@ -190,9 +196,9 @@ runs/run_id={run_id}/manifest.json
 ### L1 prefix
 
 ```text
-normalized_market_slice/window_ms=1000/event_date=YYYY-MM-DD/hour=HH/run_id={l1_run_id}-part-NNNNNN.parquet
+normalized_market_slice/venue={venue}/event_date=YYYY-MM-DD/hour=HH/window_ms=1000/shard=00/run_id={l1_run_id}-part-NNNNNN.parquet
 l1_index/window_ms=1000/event_date=YYYY-MM-DD/hour=HH/window_start_ms={ms}.json
-normalization_report/run_id={l1_run_id}.json
+normalization_report/run_id={l1_run_id}/report.json
 runs/run_id={l1_run_id}/manifest.json
 symbol_universe_snapshot/bootstrap_rollup/event_date=YYYY-MM-DD/latest.json
 supervisor/bootstrap/venue=binance/start_ms={start_ms}/end_ms={end_ms}/{success,complete}.json
@@ -239,10 +245,121 @@ aws logs filter-log-events \
 aws s3api list-objects-v2 \
   --profile "${AWS_PROFILE}" \
   --region ap-northeast-2 \
-  --bucket nangman-crypto-dev-market-ingest-l1-962214 \
+  --bucket nangman-crypto-dev-market-ingest-l1-<account-suffix> \
   --prefix supervisor/bootstrap/ \
   --query 'sort_by(Contents || `[]`, &LastModified)[-10:].{key:Key,size:Size,lastModified:LastModified}'
 ```
+
+**읽기 전용 runtime check**:
+
+```bash
+cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
+AWS_PROFILE="${AWS_PROFILE}" \
+MARKET_L0_BUCKET="nangman-crypto-dev-market-ingest-l0-<account-suffix>" \
+MARKET_L1_BUCKET="nangman-crypto-dev-market-ingest-l1-<account-suffix>" \
+./scripts/check-runtime.sh
+```
+
+이 스크립트는 AWS/ECS/CloudWatch/S3를 읽기만 한다. service stable, FARGATE_SPOT,
+ARM64 task, CloudWatch log retention 3일, 최근 lifecycle log, 최근 error 부재,
+CloudWatch ECS CPU/Memory utilization threshold, 최근 UTC hour의 L0/L1 artifact, 그리고 `l1_index` pointer에서
+manifest/report/sample slice까지 읽히는지 한 번에 확인한다. S3 object 삭제,
+service update, task restart는 수행하지 않는다. 첫 실패에서 멈추지 않고 가능한
+읽기 전용 항목을 계속 검사한 뒤 마지막에 실패 목록을 요약한다.
+
+**읽기 전용 L1 staleness diagnosis**:
+
+```bash
+cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
+AWS_PROFILE="${AWS_PROFILE}" \
+MARKET_L0_BUCKET="nangman-crypto-dev-market-ingest-l0-<account-suffix>" \
+MARKET_L1_BUCKET="nangman-crypto-dev-market-ingest-l1-<account-suffix>" \
+./scripts/diagnose-l1-staleness.sh
+```
+
+이 스크립트는 runtime check가 `RUNNING` service와 stale L1 output을 동시에
+보여줄 때 원인을 좁히는 읽기 전용 진단 도구다. 현재 task image, task hardening
+shape, 최근 CloudWatch lifecycle count, 최신 lifecycle sample, 최근 L0/L1 S3
+prefix sample을 같이 출력한다. ECS update, task restart, ECR push, S3 object
+삭제나 쓰기는 수행하지 않는다.
+
+**읽기 전용 ECR scan check**:
+
+```bash
+cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
+AWS_PROFILE="${AWS_PROFILE}" \
+MARKET_INGEST_ECR_REPOSITORY="ecr-nangman-dev-crypto-market-ingest-apn2" \
+MARKET_INGEST_ECR_IMAGE_TAG="git-<short-sha>-arm64" \
+./scripts/check-ecr-scan.sh
+```
+
+ECR Basic Scanning은 multi-arch image index tag와 child image manifest digest의 결과가
+다를 수 있다. 이 검증은 기본적으로 `arm64`가 포함된 tag를 요구하며, tag가 OCI/Docker
+multi-arch index를 가리키면 linux/arm64 child digest를 따라가 scan finding을 읽는다.
+`CRITICAL`/`HIGH` finding이 있으면 실패한다. ECR image나 repository는 수정하지 않는다.
+
+**읽기 전용 hardened task definition render**:
+
+```bash
+cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
+AWS_PROFILE="${AWS_PROFILE}" \
+MARKET_INGEST_RENDER_OUTPUT="/tmp/market-ingest-task-definition.hardened.json" \
+./scripts/render-ecs-task-definition.sh
+```
+
+이 스크립트는 현재 ECS task definition을 읽어 `register-task-definition`에 넣을 수
+있는 JSON만 렌더링한다. AWS에는 아무 것도 쓰지 않는다. 출력 JSON에는
+`readonlyRootFilesystem=true`, `user=nonroot:nonroot`,
+`capabilities.drop=ALL`이 강제된다. 새 image URI를 미리 반영해야 하면
+`MARKET_INGEST_ECR_IMAGE_URI`를 지정한다.
+
+**읽기 전용 release artifact preparation**:
+
+```bash
+cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
+AWS_PROFILE="${AWS_PROFILE}" \
+MARKET_INGEST_RELEASE_OUTPUT_DIR="/tmp/market-ingest-release-$(git rev-parse --short=12 HEAD)" \
+./scripts/prepare-release-artifacts.sh
+```
+
+이 스크립트는 현재 git sha 기준 `git-<short-sha>-arm64` image tag와 hardened
+`register-task-definition` JSON, release manifest를 `/tmp/...`에 만든다. AWS에는
+STS/ECS read API만 사용하고 ECR push, ECS register/update, S3 write/delete는 하지
+않는다. worktree가 dirty이면 manifest의 `release_ready=false`와 blocker reason으로
+기록한다.
+
+**Build provenance**:
+
+L1 normalization report는 `runner_git_sha`, `runner_git_dirty`,
+`runner_build_profile`을 포함한다. Docker build는 Rust compile 전에
+`NANGMAN_GIT_SHA`와 `NANGMAN_GIT_DIRTY` build arg를 주입해야 한다. `deploy.sh`는
+local compose build 전에 현재 git 상태를 읽어 이 값을 자동 export한다. git 상태를
+확인할 수 없으면 `NANGMAN_GIT_SHA=unknown`, `NANGMAN_GIT_DIRTY=true`로 빌드해
+증거 artifact가 clean revision처럼 보이지 않게 한다.
+
+**Local repository contract gate**:
+
+```bash
+cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
+./scripts/check-repository-contract.py
+```
+
+이 gate는 필수 파일, 실행 권한, ECS 예제 hardening, public 문서 placeholder,
+계정/profile/IP 누수 금지, README/contract 핵심 문구를 한 번에 확인한다. GitHub
+Actions도 같은 스크립트를 호출하므로 push 전에 로컬에서 같은 기준을 확인할 수 있다.
+
+**Local release readiness gate**:
+
+```bash
+cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
+./scripts/check-release-readiness.sh
+```
+
+이 gate는 shell/Python script validation, self-test, repository contract, compose
+config, Rust fmt/clippy/test, linux/arm64 Docker build, image smoke를 한 번에
+실행한다. AWS/ECR/ECS/S3에는 쓰지 않는다. 배포 승인 전에 로컬 release candidate가
+기본 DoD를 만족하는지 확인하기 위한 gate이며, runtime freshness 증명을 대체하지
+않는다.
 
 **권장 task shape (dev)**:
 
@@ -253,9 +370,12 @@ size:         2 vCPU / 4 GB  (210일 bootstrap 진행 중일 때)
 log retention: 3 days
 ECR lifecycle: 최신 5개 image 보존
 image:        distroless runtime, non-root
+task hardening: readonlyRootFilesystem=true, user=nonroot:nonroot, capabilities.drop=ALL
 ```
 
 production은 항상 하나의 ECS service. realtime/backfill/normalize를 별도 service로 쪼개지 말 것 (supervisor contract 침범).
+Placeholder 기반 production 예제는 `ecs/task-definition.example.json`,
+`ecs/service.example.json`, `ecs/task-role-policy.example.json`에 둔다.
 
 ### Local Compose
 
@@ -266,6 +386,7 @@ Linux checkout: `/home/seongwon/nangman-crypto`. 컨테이너 app root: `/opt/na
 **초기 host setup (host당 1회)**:
 
 setup 스크립트는 `/opt` 호스트 디렉터리 준비, IAM Roles Anywhere credential helper 설치, `config.container` 생성, `apps/market-ingest-app/.env` 생성 (`.env.example` 복사)을 수행한다. idempotent.
+생성된 `.env`의 `MARKET_L0_BUCKET` / `MARKET_L1_BUCKET`은 deploy 전에 실제 bucket 이름으로 바꿔야 한다.
 
 PKI material은 별도. 서명 호스트에서 받아 다음 경로에 둔다.
 
@@ -321,7 +442,7 @@ sudo docker compose \
 # 공통 prefix
 ROOT=/opt/nangman-crypto/apps/market-ingest-app
 CFG=/opt/nangman-crypto/strategies/crypto/rust-engine/config
-BUCKET=nangman-crypto-dev-market-ingest-l0-962214
+BUCKET=nangman-crypto-dev-market-ingest-l0-<account-suffix>
 ```
 
 **realtime smoke (in-memory only)**:
@@ -373,7 +494,7 @@ Upbit backfill은 recent trade history만 지원하며 `--symbols KRW-BTC,KRW-ET
 cargo run --manifest-path $ROOT/Cargo.toml --bin market-normalize -- \
   --l0-s3-bucket $BUCKET \
   --l0-local-root /opt/nangman-crypto/data/spool/market-ingest/l0 \
-  --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214 \
+  --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-<account-suffix> \
   --catchup-tmp-root /opt/nangman-crypto/data/spool/market-normalize/catchup \
   --input-start-ms 1778042400000 \
   --input-end-ms 1778043300000
@@ -384,7 +505,7 @@ cargo run --manifest-path $ROOT/Cargo.toml --bin market-normalize -- \
 ```bash
 cargo run --manifest-path $ROOT/Cargo.toml --bin market-normalize -- \
   --l0-s3-bucket $BUCKET \
-  --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214 \
+  --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-<account-suffix> \
   --aws-profile market-ingest-roles-anywhere \
   --aws-region ap-northeast-2 \
   --audit-l1-index-start-ms 1778042400000 \
@@ -416,7 +537,7 @@ debug - 고빈도 progress, heartbeat, not-ready polling, 윈도우별 시작
 **Lifecycle events (info)**:
 
 - `crypto_market_ingest_supervisor_start`
-- `crypto_market_ingest_normalize_deferred`
+- `crypto_market_ingest_live_priority_normalize_start`
 - `crypto_market_ingest_bootstrap_chunk_start` / `_l0_done` / `_l1_done` / `_chunk_done` / `_complete`
 - `crypto_market_ingest_s3_retention_run`
 - `market_ingest_start` / `market_ingest_report`
@@ -511,12 +632,13 @@ market_ingest_progress.health        - degraded/critical 지속 여부
 
 - `docker compose config` 무오류 렌더링.
 - `MARKET_INGEST_REPO_ROOT`가 실제 host clone 경로를 가리킴.
+- Docker build가 `NANGMAN_GIT_SHA` / `NANGMAN_GIT_DIRTY`를 compile-time build arg로 주입.
 - Binance와 Upbit service 모두 compose에서 시작.
 - IAM Roles Anywhere config와 PKI material은 ignored app infra에서 read-only mount.
 - local L0 데이터는 `/opt/nangman-crypto/data/spool/market-ingest/l0`에 LIVE L1 input cache로 보존.
 - fallback 다운로드는 `/opt/nangman-crypto/data/spool/market-normalize/catchup`.
-- L0 S3 출력은 `nangman-crypto-dev-market-ingest-l0-962214` (override: `MARKET_L0_BUCKET`).
-- L1 normalize 출력은 `nangman-crypto-dev-market-ingest-l1-962214` (override: `MARKET_L1_BUCKET`).
+- L0 S3 출력은 `nangman-crypto-dev-market-ingest-l0-<account-suffix>` (override: `MARKET_L0_BUCKET`).
+- L1 normalize 출력은 `nangman-crypto-dev-market-ingest-l1-<account-suffix>` (override: `MARKET_L1_BUCKET`).
 - app-owned retention: L0 = 45일, L1 = 240일, cleanup loop 주기 = 6시간.
 - bucket lifecycle은 fallback safety net: L0 = 60일, L1 = 300일, `normalized_market_slice/` = 30일 후 Standard-IA.
 - L1 universe bootstrap이 `symbol_universe_snapshot/bootstrap_rollup/*` 쓰고 읽음 (30-day point-in-time universe approval).
@@ -525,4 +647,4 @@ market_ingest_progress.health        - degraded/critical 지속 여부
 
 ---
 
-_Last updated: 2026-05-20 KST (A1/A2/B3 reflected)_
+_Last updated: 2026-05-23 KST (runtime proof and build provenance reflected)_

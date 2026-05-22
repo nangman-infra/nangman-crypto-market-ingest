@@ -231,6 +231,9 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>
     if parsed.local_disk_emergency_pct < parsed.local_disk_high_water_pct {
         return Err("--local-disk-emergency-pct must be >= --local-disk-high-water-pct".into());
     }
+    if let Some(bucket) = parsed.l0_s3_bucket.as_deref() {
+        validate_real_bucket("--l0-s3-bucket", bucket)?;
+    }
 
     if parsed.log_interval_seconds > parsed.duration_seconds {
         parsed.log_interval_seconds = parsed.duration_seconds;
@@ -318,6 +321,18 @@ fn parse_pct(value: String, name: &str) -> Result<u8, Box<dyn Error>> {
     Ok(parsed)
 }
 
+fn validate_real_bucket(name: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    if value.trim().is_empty() {
+        return Err(format!("{name} requires a bucket").into());
+    }
+    if value.contains('<') || value.contains('>') {
+        return Err(
+            format!("{name} must be a real bucket name, not a public-doc placeholder").into(),
+        );
+    }
+    Ok(())
+}
+
 pub fn print_help() {
     println!(
         "market-ingest-app\n\
@@ -329,7 +344,7 @@ pub fn print_help() {
              --log-interval-seconds 5 \\\n\
              --depth-snapshot-limit 100 \\\n\
              --binance-futures-rest-base-url https://fapi.binance.com \\\n\
-             --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214\n\
+             --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-<account-suffix>\n\
           cargo run --manifest-path /opt/nangman-crypto/apps/market-ingest-app/Cargo.toml -- \\\n\
              --venue upbit \\\n\
              --config /opt/nangman-crypto/strategies/crypto/rust-engine/config \\\n\
@@ -337,7 +352,7 @@ pub fn print_help() {
              --log-interval-seconds 5 \\\n\
              --expect-symbol-count 50 \\\n\
              --upbit-orderbook-unit 5 \\\n\
-             --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214\n\
+             --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-<account-suffix>\n\
          \n\
          This reads Binance or Upbit public WebSocket streams only. It does not use private APIs,\n\
          credentials, AI hot-path decisions, order placement, or live trading.\n\
@@ -418,5 +433,14 @@ mod tests {
         assert_eq!(parsed.s3_retention_check_interval_secs, 3600);
         assert_eq!(parsed.s3_retention_max_deletes_per_run, 50);
         assert!(!parsed.s3_retention_enabled);
+    }
+
+    #[test]
+    fn rejects_public_doc_bucket_placeholder() {
+        let mut raw = base_args();
+        raw.push("--l0-s3-bucket".to_owned());
+        raw.push("nangman-crypto-dev-market-ingest-l0-<account-suffix>".to_owned());
+        let err = parse_args(raw.into_iter()).err().unwrap();
+        assert!(err.to_string().contains("public-doc placeholder"));
     }
 }

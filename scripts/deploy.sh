@@ -54,8 +54,16 @@ load_env_file() {
     printf 'AWS_PROFILE must be set in %s or the shell before deploy\n' "$ENV_FILE" >&2
     exit 1
   fi
-  export MARKET_L0_BUCKET="${MARKET_L0_BUCKET:-${L0_S3_BUCKET:-nangman-crypto-dev-market-ingest-l0-962214}}"
-  export MARKET_L1_BUCKET="${MARKET_L1_BUCKET:-${L1_S3_BUCKET:-nangman-crypto-dev-market-ingest-l1-962214}}"
+  export MARKET_L0_BUCKET="${MARKET_L0_BUCKET:-${L0_S3_BUCKET:-}}"
+  export MARKET_L1_BUCKET="${MARKET_L1_BUCKET:-${L1_S3_BUCKET:-}}"
+  if [[ -z "$MARKET_L0_BUCKET" || "$MARKET_L0_BUCKET" == *"<"* ]]; then
+    printf 'MARKET_L0_BUCKET must be set to a real bucket in %s or the shell before deploy\n' "$ENV_FILE" >&2
+    exit 1
+  fi
+  if [[ -z "$MARKET_L1_BUCKET" || "$MARKET_L1_BUCKET" == *"<"* ]]; then
+    printf 'MARKET_L1_BUCKET must be set to a real bucket in %s or the shell before deploy\n' "$ENV_FILE" >&2
+    exit 1
+  fi
 }
 
 check_clock_sync() {
@@ -81,6 +89,24 @@ check_clock_sync() {
   log "warning: cannot verify NTP sync; configure a host NTP service before production"
 }
 
+set_build_provenance() {
+  if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    NANGMAN_GIT_SHA="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)"
+    if [[ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all)" ]]; then
+      NANGMAN_GIT_DIRTY=true
+    else
+      NANGMAN_GIT_DIRTY=false
+    fi
+  else
+    NANGMAN_GIT_SHA=unknown
+    NANGMAN_GIT_DIRTY=true
+  fi
+
+  export NANGMAN_GIT_SHA
+  export NANGMAN_GIT_DIRTY
+  log "build provenance: git_sha=$NANGMAN_GIT_SHA git_dirty=$NANGMAN_GIT_DIRTY"
+}
+
 run_runtime_preflight() {
   sudo docker compose -f "$COMPOSE" --env-file "$ENV_FILE" run \
     --rm \
@@ -90,27 +116,30 @@ run_runtime_preflight() {
   log "AWS/S3 runtime preflight ok: profile=$AWS_PROFILE region=$AWS_REGION"
 }
 
-log "[1/7] config check"
+log "[1/8] config check"
 ensure_env_file
 require_file "$ENV_FILE"
 load_env_file
 
-log "[2/7] clock preflight"
+log "[2/8] clock preflight"
 check_clock_sync
 
-log "[3/7] compose config"
+log "[3/8] build provenance"
+set_build_provenance
+
+log "[4/8] compose config"
 sudo docker compose -f "$COMPOSE" --env-file "$ENV_FILE" config >/dev/null
 
-log "[4/7] build"
+log "[5/8] build"
 sudo docker compose -f "$COMPOSE" --env-file "$ENV_FILE" build
 
-log "[5/7] AWS/S3 runtime preflight"
+log "[6/8] AWS/S3 runtime preflight"
 run_runtime_preflight
 
-log "[6/7] recreate compose services"
+log "[7/8] recreate compose services"
 sudo docker compose -f "$COMPOSE" --env-file "$ENV_FILE" up -d --force-recreate
 
-log "[7/7] service status"
+log "[8/8] service status"
 sudo docker compose -f "$COMPOSE" --env-file "$ENV_FILE" ps
 
 cat <<EOF

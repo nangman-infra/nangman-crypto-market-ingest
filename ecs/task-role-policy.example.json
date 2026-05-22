@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadWriteMarketL0Bucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::nangman-crypto-dev-market-ingest-l0-<account-suffix>",
+        "arn:aws:s3:::nangman-crypto-dev-market-ingest-l0-<account-suffix>/*"
+      ]
+    },
+    {
+      "Sid": "ReadWriteMarketL1Bucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::nangman-crypto-dev-market-ingest-l1-<account-suffix>",
+        "arn:aws:s3:::nangman-crypto-dev-market-ingest-l1-<account-suffix>/*"
+      ]
+    }
+  ]
+}

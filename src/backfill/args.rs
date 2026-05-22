@@ -226,6 +226,7 @@ pub fn parse_args(
             "--l0-s3-bucket is required".to_owned(),
         ));
     }
+    validate_real_bucket("--l0-s3-bucket", &parsed.l0_s3_bucket)?;
     if let Some(url) = parsed.rest_base_url.as_deref() {
         validate_https_url("--rest-base-url", url)?;
     }
@@ -302,6 +303,20 @@ fn validate_https_url(name: &str, value: &str) -> Result<(), BackfillError> {
     Ok(())
 }
 
+fn validate_real_bucket(name: &str, value: &str) -> Result<(), BackfillError> {
+    if value.trim().is_empty() {
+        return Err(BackfillError::InvalidArgs(format!(
+            "{name} requires a bucket"
+        )));
+    }
+    if value.contains('<') || value.contains('>') {
+        return Err(BackfillError::InvalidArgs(format!(
+            "{name} must be a real bucket name, not a public-doc placeholder"
+        )));
+    }
+    Ok(())
+}
+
 pub fn print_help() {
     println!(
         "market-backfill\n\
@@ -311,13 +326,13 @@ pub fn print_help() {
              --config /opt/nangman-crypto/strategies/crypto/rust-engine/config \\\n\
              --input-start-ms 1778042400000 \\\n\
              --input-end-ms 1778043300000 \\\n\
-             --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214\n\
+             --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-<account-suffix>\n\
            cargo run --manifest-path /opt/nangman-crypto/apps/market-ingest-app/Cargo.toml --bin market-backfill -- \\\n\
              --venue upbit \\\n\
              --input-start-ms 1778572800000 \\\n\
              --input-end-ms 1778573400000 \\\n\
              --symbols KRW-BTC,KRW-ETH \\\n\
-             --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214\n\
+             --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-<account-suffix>\n\
          \n\
          This worker writes historical raw trade events into MARKET_L0_BUCKET only.\n\
          It also runs one app-owned S3 retention cleanup pass after the backfill manifest upload.\n\
@@ -398,5 +413,13 @@ mod tests {
         raw[5] = "5".to_owned();
         let err = parse_args(raw.into_iter()).err().unwrap();
         assert!(err.to_string().contains("greater"));
+    }
+
+    #[test]
+    fn rejects_public_doc_bucket_placeholder() {
+        let mut raw = base_args();
+        raw[7] = "nangman-crypto-dev-market-ingest-l0-<account-suffix>".to_owned();
+        let err = parse_args(raw.into_iter()).err().unwrap();
+        assert!(err.to_string().contains("public-doc placeholder"));
     }
 }

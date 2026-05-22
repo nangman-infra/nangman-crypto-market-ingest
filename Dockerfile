@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 FROM public.ecr.aws/docker/library/rust:1.94-bookworm AS builder
 
 WORKDIR /opt/nangman-crypto
@@ -7,6 +5,11 @@ WORKDIR /opt/nangman-crypto
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+ARG NANGMAN_GIT_SHA=unknown
+ARG NANGMAN_GIT_DIRTY=true
+ENV NANGMAN_GIT_SHA=${NANGMAN_GIT_SHA} \
+    NANGMAN_GIT_DIRTY=${NANGMAN_GIT_DIRTY}
 
 COPY . /opt/nangman-crypto
 

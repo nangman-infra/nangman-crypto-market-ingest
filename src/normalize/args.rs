@@ -220,6 +220,8 @@ pub fn parse_args(
     if parsed.l1_s3_bucket.is_empty() {
         return Err("--l1-s3-bucket is required".into());
     }
+    validate_real_bucket("--l0-s3-bucket", &parsed.l0_s3_bucket)?;
+    validate_real_bucket("--l1-s3-bucket", &parsed.l1_s3_bucket)?;
     if parsed.watermark_delay_ms < parsed.scan_margin_ms {
         return Err("--watermark-delay-ms must be >= --scan-margin-ms".into());
     }
@@ -240,28 +242,28 @@ pub fn print_help() {
         r#"market-normalize
 Usage:
   market-normalize \
-    --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214 \
+    --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-<account-suffix> \
     --l0-local-root /opt/nangman-crypto/data/spool/market-ingest/l0 \
-    --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214 \
+    --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-<account-suffix> \
     --catchup-tmp-root /opt/nangman-crypto/data/spool/market-normalize/catchup \
     --aws-profile market-ingest-roles-anywhere
 
   market-normalize \
-    --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214 \
+    --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-<account-suffix> \
     --l0-local-root /opt/nangman-crypto/data/spool/market-ingest/l0 \
-    --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214 \
+    --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-<account-suffix> \
     --catchup-tmp-root /opt/nangman-crypto/data/spool/market-normalize/catchup \
     --input-start-ms 1778042400000 \
     --input-end-ms 1778043300000
 
   market-normalize \
-    --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214 \
-    --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214 \
+    --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-<account-suffix> \
+    --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-<account-suffix> \
     --preflight
 
   market-normalize \
-    --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214 \
-    --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214 \
+    --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-<account-suffix> \
+    --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-<account-suffix> \
     --audit-l1-index-start-ms 1778042400000 \
     --audit-l1-index-end-ms 1778043300000
 
@@ -317,6 +319,18 @@ fn parse_positive_usize(value: Option<String>, name: &str) -> Result<usize, Box<
         return Err(format!("{name} must be positive").into());
     }
     Ok(parsed)
+}
+
+fn validate_real_bucket(name: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    if value.trim().is_empty() {
+        return Err(format!("{name} requires a bucket").into());
+    }
+    if value.contains('<') || value.contains('>') {
+        return Err(
+            format!("{name} must be a real bucket name, not a public-doc placeholder").into(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -521,5 +535,17 @@ mod tests {
         let parsed = parse_args(raw.into_iter()).unwrap().unwrap();
         assert_eq!(parsed.l0_s3_retention_days, 30);
         assert_eq!(parsed.l1_s3_retention_days, 365);
+    }
+
+    #[test]
+    fn rejects_public_doc_bucket_placeholder() {
+        let raw = vec![
+            "--l0-s3-bucket".to_owned(),
+            "nangman-crypto-dev-market-ingest-l0-<account-suffix>".to_owned(),
+            "--l1-s3-bucket".to_owned(),
+            "l1".to_owned(),
+        ];
+        let err = parse_args(raw.into_iter()).err().unwrap();
+        assert!(err.to_string().contains("public-doc placeholder"));
     }
 }

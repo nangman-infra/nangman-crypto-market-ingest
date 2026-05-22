@@ -1,0 +1,33 @@
+{
+  "cluster": "ecs-nangman-dev-invest-apn2",
+  "serviceName": "svc-nangman-dev-crypto-market-ingest",
+  "taskDefinition": "td-nangman-dev-crypto-market-ingest-apn2",
+  "desiredCount": 1,
+  "capacityProviderStrategy": [
+    {
+      "capacityProvider": "FARGATE_SPOT",
+      "weight": 1,
+      "base": 0
+    }
+  ],
+  "platformVersion": "LATEST",
+  "enableExecuteCommand": false,
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": ["subnet-<private-subnet-id>"],
+      "securityGroups": ["sg-<market-ingest-security-group-id>"],
+      "assignPublicIp": "DISABLED"
+    }
+  },
+  "deploymentConfiguration": {
+    "minimumHealthyPercent": 0,
+    "maximumPercent": 100
+  },
+  "propagateTags": "SERVICE",
+  "tags": [
+    { "key": "Name", "value": "svc-nangman-dev-crypto-market-ingest" },
+    { "key": "Environment", "value": "dev" },
+    { "key": "Scope", "value": "market-data" },
+    { "key": "Owner", "value": "nangman-crypto" }
+  ]
+}

@@ -45,16 +45,15 @@ pub fn decide_live_priority_mode(
         return Ok(None);
     }
 
-    let Some(last_success_end_ms) = last_l1_success_end_ms else {
-        return Ok(None);
-    };
-    if last_success_end_ms >= ready_end_ms {
-        return Ok(None);
-    }
+    if let Some(last_success_end_ms) = last_l1_success_end_ms {
+        if last_success_end_ms >= ready_end_ms {
+            return Ok(None);
+        }
 
-    let lag_ms = ready_end_ms.saturating_sub(last_success_end_ms);
-    if lag_ms < args.live_priority_lag_threshold_ms {
-        return Ok(None);
+        let lag_ms = ready_end_ms.saturating_sub(last_success_end_ms);
+        if lag_ms < args.live_priority_lag_threshold_ms {
+            return Ok(None);
+        }
     }
 
     let start_ms = ready_end_ms.saturating_sub(interval);
@@ -306,13 +305,16 @@ mod tests {
     }
 
     #[test]
-    fn live_priority_stays_idle_without_l1_success_history() {
+    fn live_priority_can_seed_current_window_without_recent_l1_history() {
         let interval = 900_000_i64;
         let mut a = args();
         a.live_priority = true;
         let now = 100 * interval + 360_000;
-        let decision = decide_live_priority_mode(&a, now, None).unwrap();
-        assert!(decision.is_none());
+        let decision = decide_live_priority_mode(&a, now, None).unwrap().unwrap();
+
+        assert_eq!(decision.run_mode, RunMode::Live);
+        assert_eq!(decision.input_range.start_ms, 99 * interval);
+        assert_eq!(decision.input_range.end_ms, 100 * interval);
     }
 
     #[test]

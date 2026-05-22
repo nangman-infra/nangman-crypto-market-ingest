@@ -9,8 +9,10 @@ const DEFAULT_REALTIME_BIN: &str = "/usr/local/bin/market-ingest-app";
 const DEFAULT_BACKFILL_BIN: &str = "/usr/local/bin/market-backfill";
 const DEFAULT_NORMALIZE_BIN: &str = "/usr/local/bin/market-normalize";
 const DEFAULT_AWS_REGION: &str = "ap-northeast-2";
-pub(super) const DEFAULT_L0_S3_BUCKET: &str = "nangman-crypto-dev-market-ingest-l0-962214";
-pub(super) const DEFAULT_L1_S3_BUCKET: &str = "nangman-crypto-dev-market-ingest-l1-962214";
+pub(super) const DEFAULT_L0_S3_BUCKET: &str =
+    "nangman-crypto-dev-market-ingest-l0-<account-suffix>";
+pub(super) const DEFAULT_L1_S3_BUCKET: &str =
+    "nangman-crypto-dev-market-ingest-l1-<account-suffix>";
 const DEFAULT_RESTART_DELAY_SECS: u64 = 15;
 const DEFAULT_BOOTSTRAP_LOOKBACK_DAYS: i64 = 210;
 const DEFAULT_BOOTSTRAP_CHUNK_HOURS: i64 = 24;
@@ -61,8 +63,8 @@ pub fn parse_args(
 ) -> Result<Option<SupervisorArgs>, Box<dyn Error>> {
     let mut parsed = SupervisorArgs {
         config_dir: PathBuf::from(DEFAULT_CONFIG_DIR),
-        l0_s3_bucket: DEFAULT_L0_S3_BUCKET.to_owned(),
-        l1_s3_bucket: DEFAULT_L1_S3_BUCKET.to_owned(),
+        l0_s3_bucket: String::new(),
+        l1_s3_bucket: String::new(),
         aws_profile: None,
         aws_region: DEFAULT_AWS_REGION.to_owned(),
         l0_spool_root: PathBuf::from(DEFAULT_L0_SPOOL_ROOT),
@@ -201,6 +203,8 @@ pub fn parse_args(
     if parsed.realtime_venue != "binance" && parsed.realtime_venue != "upbit" {
         return Err("--realtime-venue must be binance or upbit".into());
     }
+    validate_bucket_arg(&parsed.l0_s3_bucket, "--l0-s3-bucket")?;
+    validate_bucket_arg(&parsed.l1_s3_bucket, "--l1-s3-bucket")?;
     if parsed.bootstrap_lookback_days > 0 && parsed.bootstrap_chunk_hours > 24 {
         return Err("--bootstrap-chunk-hours must be <= 24 to keep recovery chunks bounded".into());
     }
@@ -217,21 +221,34 @@ pub fn print_help() {
         r#"crypto-market-ingest-supervisor
 Usage:
   crypto-market-ingest-supervisor \
-    --l0-s3-bucket nangman-crypto-dev-market-ingest-l0-962214 \
-    --l1-s3-bucket nangman-crypto-dev-market-ingest-l1-962214
+    --l0-s3-bucket {} \
+    --l1-s3-bucket {}
 
 Runs the all-in-one market data service:
   1. realtime L0 ingest
   2. historical bootstrap backfill
   3. long-lived L1 normalization
 
-The ECS service should run this supervisor as the only container entrypoint."#
+The ECS service should run this supervisor as the only container entrypoint."#,
+        DEFAULT_L0_S3_BUCKET, DEFAULT_L1_S3_BUCKET
     );
 }
 
 fn next_arg(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, Box<dyn Error>> {
     args.next()
         .ok_or_else(|| format!("{name} requires a value").into())
+}
+
+fn validate_bucket_arg(value: &str, name: &str) -> Result<(), Box<dyn Error>> {
+    if value.trim().is_empty() {
+        return Err(format!("{name} is required").into());
+    }
+    if value.contains('<') || value.contains('>') {
+        return Err(
+            format!("{name} must be a real bucket name, not a public-doc placeholder").into(),
+        );
+    }
+    Ok(())
 }
 
 fn parse_positive_i64(value: String) -> Result<i64, Box<dyn Error>> {

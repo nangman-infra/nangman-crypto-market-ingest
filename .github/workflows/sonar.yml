@@ -41,6 +41,22 @@ jobs:
       - name: Run Rust test gate
         run: cargo test --all-targets
 
+      - name: Run repository contract gate
+        run: |
+          bash -n scripts/deploy.sh
+          bash -n scripts/check-runtime.sh
+          bash -n scripts/check-ecr-scan.sh
+          bash -n scripts/render-ecs-task-definition.sh
+          bash -n scripts/diagnose-l1-staleness.sh
+          bash -n scripts/check-release-readiness.sh
+          bash -n scripts/prepare-release-artifacts.sh
+          MARKET_INGEST_RUNTIME_SELF_TEST=1 bash scripts/check-runtime.sh
+          MARKET_INGEST_ECR_SCAN_SELF_TEST=1 bash scripts/check-ecr-scan.sh
+          MARKET_INGEST_RENDER_TASK_DEFINITION_SELF_TEST=1 bash scripts/render-ecs-task-definition.sh
+          MARKET_INGEST_DIAGNOSE_L1_SELF_TEST=1 bash scripts/diagnose-l1-staleness.sh
+          MARKET_INGEST_PREPARE_RELEASE_SELF_TEST=1 bash scripts/prepare-release-artifacts.sh
+          python3 scripts/check-repository-contract.py
+
   sonarqube:
     name: SonarQube Scan
     needs: quality-checks

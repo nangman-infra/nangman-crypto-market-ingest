@@ -6,7 +6,10 @@ pub use self::args::{SupervisorArgs, parse_args, print_help};
 use self::bootstrap::{
     BootstrapChunk, BootstrapMarkerStore, next_missing_bootstrap_chunk, normalize_subchunks,
 };
-use self::worker_args::{backfill_args, normalize_args, normalize_backfill_args, realtime_args};
+use self::worker_args::{
+    backfill_args, live_priority_normalize_args, normalize_args, normalize_backfill_args,
+    realtime_args,
+};
 
 use crate::log_stream;
 use crate::shutdown::ShutdownListener;
@@ -48,12 +51,16 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
     });
 
     let mut realtime = spawn_realtime(&args)?;
-    let mut normalize = if args.bootstrap_enabled {
+    let mut bootstrap_active = args.bootstrap_enabled;
+    let mut normalize = if bootstrap_active {
         log_stream::info(
-            "crypto_market_ingest_normalize_deferred",
-            json!({ "reason": "bootstrap_l0_l1_in_progress" }),
+            "crypto_market_ingest_live_priority_normalize_start",
+            json!({
+                "reason": "bootstrap_l0_l1_in_progress",
+                "max_windows_per_tick": 1
+            }),
         )?;
-        None
+        Some(spawn_live_priority_normalize(&args)?)
     } else {
         Some(spawn_normalize(&args)?)
     };
@@ -81,10 +88,14 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
                 }
                 log_stream::warn(
                     "crypto_market_ingest_normalize_restart",
-                    json!({ "exit_status": status.to_string(), "restart_delay_secs": args.restart_delay_secs }),
+                    json!({
+                        "exit_status": status.to_string(),
+                        "restart_delay_secs": args.restart_delay_secs,
+                        "bootstrap_active": bootstrap_active
+                    }),
                 )?;
                 tokio::time::sleep(restart_delay).await;
-                normalize = Some(spawn_normalize(&args)?);
+                normalize = Some(spawn_normalize_for_phase(&args, bootstrap_active)?);
             }
             backfill_result = &mut backfill_scheduler => {
                 if shutdown_requested.load(Ordering::SeqCst) {
@@ -95,13 +106,13 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
                 }
                 match backfill_result {
                     Ok(Ok(())) => {
+                        bootstrap_active = false;
                         log_stream::info(
                             "crypto_market_ingest_bootstrap_complete",
-                            json!({ "next_worker": "normalize" }),
+                            json!({ "next_worker": "full_normalize" }),
                         )?;
-                        if normalize.is_none() {
-                            normalize = Some(spawn_normalize(&args)?);
-                        }
+                        kill_optional_child(&mut normalize).await;
+                        normalize = Some(spawn_normalize(&args)?);
                         backfill_scheduler = spawn_idle_backfill_scheduler(&shutdown_requested);
                         continue;
                     }
@@ -180,6 +191,23 @@ fn spawn_normalize(args: &SupervisorArgs) -> Result<Child, Box<dyn Error>> {
     let mut command = Command::new(&args.normalize_bin);
     command.args(normalize_args(args));
     spawn_child("normalize", command)
+}
+
+fn spawn_live_priority_normalize(args: &SupervisorArgs) -> Result<Child, Box<dyn Error>> {
+    let mut command = Command::new(&args.normalize_bin);
+    command.args(live_priority_normalize_args(args));
+    spawn_child("live-priority-normalize", command)
+}
+
+fn spawn_normalize_for_phase(
+    args: &SupervisorArgs,
+    bootstrap_active: bool,
+) -> Result<Child, Box<dyn Error>> {
+    if bootstrap_active {
+        spawn_live_priority_normalize(args)
+    } else {
+        spawn_normalize(args)
+    }
 }
 
 fn spawn_child(role: &str, mut command: Command) -> Result<Child, Box<dyn Error>> {
@@ -426,16 +454,37 @@ mod tests {
     use super::bootstrap::bootstrap_chunks;
     use super::*;
 
+    fn default_args() -> SupervisorArgs {
+        parse_args(
+            vec![
+                "--l0-s3-bucket".to_owned(),
+                "test-market-l0".to_owned(),
+                "--l1-s3-bucket".to_owned(),
+                "test-market-l1".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
     #[test]
-    fn defaults_enable_all_in_one_contract() {
-        let parsed = parse_args(Vec::<String>::new().into_iter())
-            .unwrap()
-            .unwrap();
+    fn requires_real_s3_buckets_for_all_in_one_contract() {
+        let err = parse_args(Vec::<String>::new().into_iter())
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("--l0-s3-bucket"));
+    }
+
+    #[test]
+    fn explicit_args_enable_all_in_one_contract() {
+        let parsed = default_args();
         assert!(parsed.bootstrap_enabled);
         assert_eq!(parsed.bootstrap_lookback_days, 210);
         assert_eq!(parsed.realtime_venue, "binance");
-        assert_eq!(parsed.l0_s3_bucket, args::DEFAULT_L0_S3_BUCKET);
-        assert_eq!(parsed.l1_s3_bucket, args::DEFAULT_L1_S3_BUCKET);
+        assert_eq!(parsed.l0_s3_bucket, "test-market-l0");
+        assert_eq!(parsed.l1_s3_bucket, "test-market-l1");
         assert_eq!(
             parsed.l0_run_key_overlap_ms,
             args::DEFAULT_L0_RUN_KEY_OVERLAP_MS
@@ -446,6 +495,10 @@ mod tests {
     fn parses_bootstrap_symbols_and_knobs() {
         let parsed = parse_args(
             vec![
+                "--l0-s3-bucket".to_owned(),
+                "test-market-l0".to_owned(),
+                "--l1-s3-bucket".to_owned(),
+                "test-market-l1".to_owned(),
                 "--bootstrap-symbols".to_owned(),
                 "btcusdt, ethusdt".to_owned(),
                 "--bootstrap-lookback-days".to_owned(),
@@ -470,9 +523,7 @@ mod tests {
 
     #[test]
     fn bootstrap_chunks_are_oldest_first_and_hour_aligned() {
-        let mut args = parse_args(Vec::<String>::new().into_iter())
-            .unwrap()
-            .unwrap();
+        let mut args = default_args();
         args.bootstrap_lookback_days = 1;
         args.bootstrap_chunk_hours = 6;
         let now = 1778947200123;
@@ -491,9 +542,7 @@ mod tests {
 
     #[test]
     fn bootstrap_chunks_do_not_shift_within_same_chunk_boundary() {
-        let mut args = parse_args(Vec::<String>::new().into_iter())
-            .unwrap()
-            .unwrap();
+        let mut args = default_args();
         args.bootstrap_lookback_days = 2;
         args.bootstrap_chunk_hours = 24;
         let chunks_before = bootstrap_chunks(&args, 1778979600123);
@@ -515,19 +564,26 @@ mod tests {
 
     #[test]
     fn rejects_unstable_bootstrap_chunk_hours() {
-        let err =
-            parse_args(vec!["--bootstrap-chunk-hours".to_owned(), "7".to_owned()].into_iter())
-                .unwrap_err()
-                .to_string();
+        let err = parse_args(
+            vec![
+                "--l0-s3-bucket".to_owned(),
+                "test-market-l0".to_owned(),
+                "--l1-s3-bucket".to_owned(),
+                "test-market-l1".to_owned(),
+                "--bootstrap-chunk-hours".to_owned(),
+                "7".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .unwrap_err()
+        .to_string();
 
         assert!(err.contains("evenly divide 24"));
     }
 
     #[test]
     fn backfill_args_include_symbol_filter_when_configured() {
-        let mut args = parse_args(Vec::<String>::new().into_iter())
-            .unwrap()
-            .unwrap();
+        let mut args = default_args();
         args.bootstrap_symbols = Some(vec!["BTCUSDT".to_owned()]);
         let values = backfill_args(
             &args,
@@ -545,9 +601,7 @@ mod tests {
 
     #[test]
     fn bootstrap_l1_normalize_subchunks_use_schedule_interval() {
-        let mut args = parse_args(Vec::<String>::new().into_iter())
-            .unwrap()
-            .unwrap();
+        let mut args = default_args();
         args.normalize_schedule_interval_ms = 900_000;
 
         let chunks = normalize_subchunks(
@@ -577,9 +631,7 @@ mod tests {
 
     #[test]
     fn normalize_backfill_args_add_explicit_input_range() {
-        let args = parse_args(Vec::<String>::new().into_iter())
-            .unwrap()
-            .unwrap();
+        let args = default_args();
         let values = normalize_backfill_args(
             &args,
             &BootstrapChunk {
@@ -602,9 +654,7 @@ mod tests {
 
     #[test]
     fn normalize_args_use_dedicated_run_key_overlap() {
-        let mut args = parse_args(Vec::<String>::new().into_iter())
-            .unwrap()
-            .unwrap();
+        let mut args = default_args();
         args.realtime_duration_seconds = 31_536_000;
         args.l0_run_key_overlap_ms = 720_000;
         let values = normalize_args(&args);
@@ -613,5 +663,23 @@ mod tests {
             .find(|pair| pair[0] == "--l0-run-key-overlap-ms")
             .map(|pair| pair[1].clone());
         assert_eq!(overlap, Some("720000".to_owned()));
+    }
+
+    #[test]
+    fn live_priority_normalize_args_limit_work_to_one_window() {
+        let mut args = default_args();
+        args.normalize_max_windows_per_tick = 192;
+
+        let values = live_priority_normalize_args(&args);
+
+        assert!(values.iter().any(|value| value == "--live-priority"));
+        assert_eq!(
+            values
+                .windows(2)
+                .filter(|pair| pair[0] == "--max-windows-per-tick")
+                .map(|pair| pair[1].as_str())
+                .next_back(),
+            Some("1")
+        );
     }
 }

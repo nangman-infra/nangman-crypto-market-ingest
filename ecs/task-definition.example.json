@@ -1,0 +1,80 @@
+{
+  "family": "td-nangman-dev-crypto-market-ingest-apn2",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "4096",
+  "runtimePlatform": {
+    "cpuArchitecture": "ARM64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "ephemeralStorage": {
+    "sizeInGiB": 50
+  },
+  "executionRoleArn": "arn:aws:iam::<aws-account-id>:role/REPLACE_WITH_ECS_EXECUTION_ROLE",
+  "taskRoleArn": "arn:aws:iam::<aws-account-id>:role/REPLACE_WITH_MARKET_INGEST_TASK_ROLE",
+  "volumes": [
+    { "name": "market-l0-spool" },
+    { "name": "market-l1-spool" },
+    { "name": "market-normalize-catchup" }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "market-ingest-app",
+      "image": "REPLACE_WITH_ECR_IMAGE_URI",
+      "essential": true,
+      "stopTimeout": 120,
+      "user": "nonroot:nonroot",
+      "readonlyRootFilesystem": true,
+      "linuxParameters": {
+        "capabilities": {
+          "drop": ["ALL"]
+        }
+      },
+      "command": [
+        "--l0-s3-bucket",
+        "nangman-crypto-dev-market-ingest-l0-<account-suffix>",
+        "--l1-s3-bucket",
+        "nangman-crypto-dev-market-ingest-l1-<account-suffix>",
+        "--aws-region",
+        "ap-northeast-2",
+        "--bootstrap-lookback-days",
+        "210",
+        "--bootstrap-chunk-hours",
+        "24",
+        "--normalize-max-windows-per-tick",
+        "192"
+      ],
+      "environment": [
+        { "name": "AWS_REGION", "value": "ap-northeast-2" },
+        { "name": "MARKET_INGEST_LOG_LEVEL", "value": "info" }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "market-l0-spool",
+          "containerPath": "/opt/nangman-crypto/data/spool/market-ingest/l0",
+          "readOnly": false
+        },
+        {
+          "sourceVolume": "market-l1-spool",
+          "containerPath": "/opt/nangman-crypto/data/spool/market-ingest/l1",
+          "readOnly": false
+        },
+        {
+          "sourceVolume": "market-normalize-catchup",
+          "containerPath": "/opt/nangman-crypto/data/spool/market-normalize/catchup",
+          "readOnly": false
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/nangman/dev/crypto-market-ingest",
+          "awslogs-region": "ap-northeast-2",
+          "awslogs-create-group": "true",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
