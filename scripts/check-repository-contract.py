@@ -43,6 +43,7 @@ REQUIRED_WRITABLE_MOUNT_POINTS = {
     "market-l1-spool": "/opt/nangman-crypto/data/spool/market-ingest/l1",
     "market-normalize-catchup": "/opt/nangman-crypto/data/spool/market-normalize/catchup",
 }
+TASK_DEFINITION_EXAMPLE_LABEL = "ecs/task-definition.example.json"
 
 REQUIRED_PATHS = [
     README_PATH,
@@ -131,6 +132,46 @@ def check_service_example(path: pathlib.Path) -> None:
         fail("ecs/service.example.json must include subnet and security group placeholders")
 
 
+def check_required_writable_mounts(
+    task_definition: dict[str, object],
+    container: dict[str, object],
+) -> None:
+    volume_names = {
+        volume.get("name")
+        for volume in task_definition.get("volumes", [])
+        if isinstance(volume, dict)
+    }
+    mount_points = {
+        mount.get("sourceVolume"): mount
+        for mount in container.get("mountPoints", [])
+        if isinstance(mount, dict)
+    }
+
+    for volume_name, container_path in REQUIRED_WRITABLE_MOUNT_POINTS.items():
+        check_required_writable_mount(volume_names, mount_points, volume_name, container_path)
+
+
+def check_required_writable_mount(
+    volume_names: set[object],
+    mount_points: dict[object, dict[str, object]],
+    volume_name: str,
+    container_path: str,
+) -> None:
+    if volume_name not in volume_names:
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} must define writable volume {volume_name}")
+
+    mount = mount_points.get(volume_name)
+    if not mount:
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} must mount writable volume {volume_name}")
+    if mount.get("containerPath") != container_path:
+        fail(
+            f"{TASK_DEFINITION_EXAMPLE_LABEL} mount "
+            f"{volume_name} must target {container_path}"
+        )
+    if mount.get("readOnly") is not False:
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} mount {volume_name} must be readOnly=false")
+
+
 def check_task_definition_example(path: pathlib.Path) -> None:
     task_definition = load_json(path)
     if not isinstance(task_definition, dict):
@@ -138,42 +179,22 @@ def check_task_definition_example(path: pathlib.Path) -> None:
 
     runtime_platform = task_definition.get("runtimePlatform", {})
     if runtime_platform.get("cpuArchitecture") != "ARM64":
-        fail("ecs/task-definition.example.json must target ARM64")
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} must target ARM64")
     if "FARGATE" not in task_definition.get("requiresCompatibilities", []):
-        fail("ecs/task-definition.example.json must require FARGATE compatibility")
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} must require FARGATE compatibility")
 
     containers = task_definition.get("containerDefinitions", [])
     if len(containers) != 1:
-        fail("ecs/task-definition.example.json must contain one supervisor container")
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} must contain one supervisor container")
     container = containers[0]
     if container.get("readonlyRootFilesystem") is not True:
-        fail("ecs/task-definition.example.json container must use readonlyRootFilesystem=true")
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} container must use readonlyRootFilesystem=true")
 
-    volume_names = {
-        volume.get("name") for volume in task_definition.get("volumes", [])
-    }
-    mount_points = {
-        mount.get("sourceVolume"): mount
-        for mount in container.get("mountPoints", [])
-        if isinstance(mount, dict)
-    }
-    for volume_name, container_path in REQUIRED_WRITABLE_MOUNT_POINTS.items():
-        if volume_name not in volume_names:
-            fail(f"ecs/task-definition.example.json must define writable volume {volume_name}")
-        mount = mount_points.get(volume_name)
-        if not mount:
-            fail(f"ecs/task-definition.example.json must mount writable volume {volume_name}")
-        if mount.get("containerPath") != container_path:
-            fail(
-                "ecs/task-definition.example.json mount "
-                f"{volume_name} must target {container_path}"
-            )
-        if mount.get("readOnly") is not False:
-            fail(f"ecs/task-definition.example.json mount {volume_name} must be readOnly=false")
+    check_required_writable_mounts(task_definition, container)
 
     container_user = (container.get("user") or "").strip().lower()
     if container_user in {"", "0", "0:0", "root", "root:root"}:
-        fail("ecs/task-definition.example.json container must set an explicit non-root user")
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} container must set an explicit non-root user")
 
     capability_drops = {
         item.upper()
@@ -184,11 +205,11 @@ def check_task_definition_example(path: pathlib.Path) -> None:
         )
     }
     if "ALL" not in capability_drops:
-        fail("ecs/task-definition.example.json container must drop all Linux capabilities")
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} container must drop all Linux capabilities")
 
     command = container.get("command", [])
     if "--l0-s3-bucket" not in command or "--l1-s3-bucket" not in command:
-        fail("ecs/task-definition.example.json command must pass explicit L0/L1 buckets")
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} command must pass explicit L0/L1 buckets")
 
 
 def check_required_phrases() -> None:
