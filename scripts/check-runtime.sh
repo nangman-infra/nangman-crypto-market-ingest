@@ -428,8 +428,12 @@ if container.get("readonlyRootFilesystem") is not True:
     print("container readonlyRootFilesystem must be true", file=sys.stderr)
     sys.exit(1)
 container_user = (container.get("user") or "").strip().lower()
-if container_user in {"", "0", "0:0", "root", "root:root"}:
-    print(f"container user must be an explicit non-root user, got: {container.get('user')}", file=sys.stderr)
+if container_user != "0:0":
+    print(
+        "container user must be 0:0 for root-owned Fargate writable bind mounts, "
+        f"got: {container.get('user')}",
+        file=sys.stderr,
+    )
     sys.exit(1)
 capability_drops = {
     item.upper()
@@ -765,7 +769,7 @@ self_test_ecs_validators() {
       "containerDefinitions": [{
         "name": "market-ingest-app",
         "readonlyRootFilesystem": true,
-        "user": "nonroot:nonroot",
+        "user": "0:0",
         "linuxParameters": {
           "capabilities": {
             "drop": ["ALL"]

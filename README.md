@@ -309,8 +309,9 @@ MARKET_INGEST_RENDER_OUTPUT="/tmp/market-ingest-task-definition.hardened.json" \
 
 이 스크립트는 현재 ECS task definition을 읽어 `register-task-definition`에 넣을 수
 있는 JSON만 렌더링한다. AWS에는 아무 것도 쓰지 않는다. 출력 JSON에는
-`readonlyRootFilesystem=true`, `user=nonroot:nonroot`,
-`capabilities.drop=ALL`이 강제된다. 새 image URI를 미리 반영해야 하면
+`readonlyRootFilesystem=true`, `user=0:0`,
+`capabilities.drop=ALL`이 강제된다. Fargate writable bind mount는 기본
+root-owned라서 이 조합을 사용한다. 새 image URI를 미리 반영해야 하면
 `MARKET_INGEST_ECR_IMAGE_URI`를 지정한다.
 
 **읽기 전용 release artifact preparation**:
@@ -369,8 +370,8 @@ platform:     LINUX/ARM64
 size:         2 vCPU / 4 GB  (210일 bootstrap 진행 중일 때)
 log retention: 3 days
 ECR lifecycle: 최신 5개 image 보존
-image:        distroless runtime, non-root
-task hardening: readonlyRootFilesystem=true, user=nonroot:nonroot, capabilities.drop=ALL
+image:        distroless runtime
+task hardening: readonlyRootFilesystem=true, user=0:0, capabilities.drop=ALL
 ```
 
 production은 항상 하나의 ECS service. realtime/backfill/normalize를 별도 service로 쪼개지 말 것 (supervisor contract 침범).

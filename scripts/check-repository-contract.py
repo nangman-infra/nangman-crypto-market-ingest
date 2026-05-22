@@ -192,9 +192,11 @@ def check_task_definition_example(path: pathlib.Path) -> None:
 
     check_required_writable_mounts(task_definition, container)
 
-    container_user = (container.get("user") or "").strip().lower()
-    if container_user in {"", "0", "0:0", "root", "root:root"}:
-        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} container must set an explicit non-root user")
+    if (container.get("user") or "").strip().lower() != "0:0":
+        fail(
+            f"{TASK_DEFINITION_EXAMPLE_LABEL} container must set user=0:0 "
+            "for root-owned Fargate writable bind mounts"
+        )
 
     capability_drops = {
         item.upper()

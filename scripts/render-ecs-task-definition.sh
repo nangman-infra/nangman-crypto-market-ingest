@@ -104,7 +104,7 @@ if image_uri:
     container["image"] = image_uri
 
 container["readonlyRootFilesystem"] = True
-container["user"] = "nonroot:nonroot"
+container["user"] = "0:0"
 for source_volume, container_path in required_writable_mounts.items():
     ensure_volume(source_volume)
     ensure_mount(container, source_volume, container_path)
@@ -161,7 +161,7 @@ assert "revision" not in data
 assert data["runtimePlatform"]["cpuArchitecture"] == "ARM64"
 assert container["image"] == "new-image"
 assert container["readonlyRootFilesystem"] is True
-assert container["user"] == "nonroot:nonroot"
+assert container["user"] == "0:0"
 assert "ALL" in container["linuxParameters"]["capabilities"]["drop"]
 volumes = {volume["name"] for volume in data["volumes"]}
 mounts = {

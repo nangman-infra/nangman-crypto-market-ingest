@@ -24,7 +24,7 @@
       "image": "REPLACE_WITH_ECR_IMAGE_URI",
       "essential": true,
       "stopTimeout": 120,
-      "user": "nonroot:nonroot",
+      "user": "0:0",
       "readonlyRootFilesystem": true,
       "linuxParameters": {
         "capabilities": {

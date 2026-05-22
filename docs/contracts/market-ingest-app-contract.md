@@ -61,6 +61,9 @@ definition must mount writable Fargate ephemeral volumes for:
 
 These mounts are required for local L0 buffering, L1 output verification, and
 catch-up reads while keeping the rest of the container filesystem read-only.
+Fargate bind mounts are root-owned by default, so the task runs with
+`user=0:0`, `readonlyRootFilesystem=true`, and `capabilities.drop=["ALL"]`
+until a managed EBS/EFS access point with non-root write permissions is adopted.
 
 ## L0 Artifact Families
 
@@ -241,8 +244,8 @@ ecs/task-role-policy.example.json
 The service example must keep the single supervisor service on `FARGATE_SPOT`
 with public IP assignment disabled and only placeholder subnet/security group
 values. The task definition example must use ARM64/FARGATE, one supervisor
-container, `readonlyRootFilesystem=true`, explicit non-root user, and
-`capabilities.drop=["ALL"]`.
+container, `readonlyRootFilesystem=true`, `user=0:0` for root-owned writable
+bind mounts, and `capabilities.drop=["ALL"]`.
 
 The read-only hardening renderer is:
 
@@ -254,7 +257,7 @@ It may call AWS read APIs for ECS only. It must output a
 `register-task-definition` JSON document and must not register the task
 definition, update the service, push images, or mutate AWS state. The output
 must preserve the single-supervisor ARM64/FARGATE shape and enforce
-`readonlyRootFilesystem=true`, explicit non-root user, and `drop=["ALL"]`.
+`readonlyRootFilesystem=true`, `user=0:0`, and `drop=["ALL"]`.
 
 The read-only ECR scan verifier is:
 
