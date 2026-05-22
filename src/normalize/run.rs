@@ -559,10 +559,15 @@ async fn run_decision_body(
         start_ms: input_range.start_ms.saturating_sub(args.scan_margin_ms),
         end_ms: input_range.end_ms.saturating_add(args.scan_margin_ms),
     };
+    let projection_lookback_ms = if args.live_priority_only {
+        args.scan_margin_ms
+    } else {
+        args.projection_lookback_ms
+    };
     let read_range = InputRange {
         start_ms: input_range
             .start_ms
-            .saturating_sub(args.scan_margin_ms.max(args.projection_lookback_ms)),
+            .saturating_sub(args.scan_margin_ms.max(projection_lookback_ms)),
         end_ms: scan_range.end_ms,
     };
 
@@ -577,7 +582,7 @@ async fn run_decision_body(
             "scan_end_ms": scan_range.end_ms,
             "read_start_ms": read_range.start_ms,
             "read_end_ms": read_range.end_ms,
-            "projection_lookback_ms": args.projection_lookback_ms
+            "projection_lookback_ms": projection_lookback_ms
         }),
     )?;
 

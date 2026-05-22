@@ -38,14 +38,14 @@ pub(crate) async fn collect_input_entries(
     l0_local_root: &Path,
     range: InputRange,
     run_mode: RunMode,
-    _l0_run_key_overlap_ms: i64,
+    l0_run_key_overlap_ms: i64,
 ) -> Result<Vec<InputEntry>, StorageError> {
     let local_entries = if matches!(run_mode, RunMode::Live) {
         local_input_entries(l0_local_root, range)?
     } else {
         Vec::new()
     };
-    let s3_keys = s3_input_keys(s3, range).await?;
+    let s3_keys = s3_input_keys(s3, range, run_mode, l0_run_key_overlap_ms).await?;
     Ok(merge_entries(local_entries, s3_keys))
 }
 
@@ -64,7 +64,12 @@ fn merge_entries(local_entries: Vec<InputEntry>, s3_keys: Vec<String>) -> Vec<In
     entries.into_values().collect()
 }
 
-async fn s3_input_keys(s3: &S3Uploader, range: InputRange) -> Result<Vec<String>, StorageError> {
+async fn s3_input_keys(
+    s3: &S3Uploader,
+    range: InputRange,
+    run_mode: RunMode,
+    l0_run_key_overlap_ms: i64,
+) -> Result<Vec<String>, StorageError> {
     let mut keys = BTreeSet::new();
     let parts = hourly_parts(range.start_ms, range.end_ms);
     for part in &parts {
@@ -77,6 +82,9 @@ async fn s3_input_keys(s3: &S3Uploader, range: InputRange) -> Result<Vec<String>
                         part.event_date, part.hour
                     ),
                     &mut keys,
+                    range,
+                    run_mode,
+                    l0_run_key_overlap_ms,
                 )
                 .await?;
             }
@@ -87,6 +95,9 @@ async fn s3_input_keys(s3: &S3Uploader, range: InputRange) -> Result<Vec<String>
                     part.event_date, part.hour
                 ),
                 &mut keys,
+                range,
+                run_mode,
+                l0_run_key_overlap_ms,
             )
             .await?;
             list_into(
@@ -96,6 +107,9 @@ async fn s3_input_keys(s3: &S3Uploader, range: InputRange) -> Result<Vec<String>
                     part.event_date, part.hour
                 ),
                 &mut keys,
+                range,
+                run_mode,
+                l0_run_key_overlap_ms,
             )
             .await?;
             for gap_type in GAP_ALERT_TYPES {
@@ -106,6 +120,9 @@ async fn s3_input_keys(s3: &S3Uploader, range: InputRange) -> Result<Vec<String>
                         part.event_date, part.hour
                     ),
                     &mut keys,
+                    range,
+                    run_mode,
+                    l0_run_key_overlap_ms,
                 )
                 .await?;
             }
@@ -140,6 +157,9 @@ async fn list_into(
     s3: &S3Uploader,
     prefix: &str,
     keys: &mut BTreeSet<String>,
+    range: InputRange,
+    run_mode: RunMode,
+    l0_run_key_overlap_ms: i64,
 ) -> Result<(), StorageError> {
     let _ = log_stream::debug(
         "market_normalize_listing_inputs",
@@ -150,11 +170,13 @@ async fn list_into(
     );
     let listed_keys = s3.list_keys(prefix).await?;
     let listed_key_count = listed_keys.len();
-    let mut parquet_key_count = 0_usize;
+    let parquet_key_count = listed_keys
+        .iter()
+        .filter(|key| key.ends_with(".parquet"))
+        .count();
     let mut selected_key_count = 0_usize;
-    for key in listed_keys {
+    for key in select_s3_keys(listed_keys, range, run_mode, l0_run_key_overlap_ms) {
         if key.ends_with(".parquet") {
-            parquet_key_count += 1;
             selected_key_count += 1;
             keys.insert(key);
         }
@@ -170,6 +192,61 @@ async fn list_into(
         }),
     );
     Ok(())
+}
+
+fn select_s3_keys(
+    listed_keys: Vec<String>,
+    range: InputRange,
+    run_mode: RunMode,
+    l0_run_key_overlap_ms: i64,
+) -> Vec<String> {
+    let parquet_keys = listed_keys
+        .into_iter()
+        .filter(|key| key.ends_with(".parquet"))
+        .collect::<Vec<_>>();
+    if !matches!(run_mode, RunMode::Live) {
+        return parquet_keys;
+    }
+
+    let mut run_starts = parquet_keys
+        .iter()
+        .filter_map(|key| run_start_ms_from_key(key))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    run_starts.sort_unstable();
+
+    parquet_keys
+        .into_iter()
+        .filter(|key| {
+            let Some(run_start_ms) = run_start_ms_from_key(key) else {
+                return true;
+            };
+            let run_end_ms = next_run_start_ms(&run_starts, run_start_ms).unwrap_or(i64::MAX);
+            let range_start_ms = range.start_ms.saturating_sub(l0_run_key_overlap_ms);
+            run_start_ms < range.end_ms && run_end_ms > range_start_ms
+        })
+        .collect()
+}
+
+fn run_start_ms_from_key(key: &str) -> Option<i64> {
+    let marker = "run_id=";
+    let start = key.find(marker)? + marker.len();
+    let tail = key.get(start..)?;
+    let end = tail.find('/').unwrap_or(tail.len());
+    let run_id = tail.get(..end)?;
+    let run_id = run_id
+        .split_once("-part-")
+        .map_or(run_id, |(prefix, _)| prefix);
+    let seconds = run_id.rsplit('-').next()?.parse::<i64>().ok()?;
+    seconds.checked_mul(1_000)
+}
+
+fn next_run_start_ms(run_starts: &[i64], current: i64) -> Option<i64> {
+    run_starts
+        .iter()
+        .copied()
+        .find(|candidate| *candidate > current)
 }
 
 fn hourly_parts(start_ms: i64, end_ms: i64) -> Vec<HourPart> {
@@ -308,5 +385,51 @@ mod tests {
         let parts = hourly_parts(1_779_471_000_000, 1_779_471_900_000);
 
         assert!(key_matches_parts(key, &parts));
+    }
+
+    #[test]
+    fn live_s3_selection_keeps_long_running_run_that_overlaps_range() {
+        let old_run = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-22/hour=18/shard=00/run_id=market-ingest-binance-1779471443-part-000001.parquet".to_owned();
+        let overlap_run = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-22/hour=18/shard=00/run_id=market-ingest-binance-1779473155-part-000001.parquet".to_owned();
+        let active_run = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-22/hour=18/shard=00/run_id=market-ingest-binance-1779474484-part-000001.parquet".to_owned();
+        let future_run = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-22/hour=18/shard=00/run_id=market-ingest-binance-1779476052-part-000001.parquet".to_owned();
+
+        let selected = select_s3_keys(
+            vec![
+                old_run.clone(),
+                overlap_run.clone(),
+                active_run.clone(),
+                future_run.clone(),
+            ],
+            InputRange {
+                start_ms: 1_779_474_600_000,
+                end_ms: 1_779_475_800_000,
+            },
+            RunMode::Live,
+            360_000,
+        );
+
+        assert!(selected.contains(&overlap_run));
+        assert!(selected.contains(&active_run));
+        assert!(!selected.contains(&old_run));
+        assert!(!selected.contains(&future_run));
+    }
+
+    #[test]
+    fn backfill_s3_selection_keeps_all_parquet_keys() {
+        let parquet = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-22/hour=18/shard=00/run_id=market-ingest-binance-1779471443-part-000001.parquet".to_owned();
+        let non_parquet = "raw_market_event/venue=binance/event_type=trade/event_date=2026-05-22/hour=18/shard=00/run_id=market-ingest-binance-1779471443-part-000001.txt".to_owned();
+
+        let selected = select_s3_keys(
+            vec![parquet.clone(), non_parquet],
+            InputRange {
+                start_ms: 1_779_474_600_000,
+                end_ms: 1_779_475_800_000,
+            },
+            RunMode::Backfill,
+            360_000,
+        );
+
+        assert_eq!(selected, vec![parquet]);
     }
 }
