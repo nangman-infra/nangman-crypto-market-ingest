@@ -10,6 +10,71 @@ import re
 import sys
 
 
+README_PATH = pathlib.Path("README.md")
+DOCKERFILE_PATH = pathlib.Path("Dockerfile")
+DOCKERIGNORE_PATH = pathlib.Path(".dockerignore")
+GITIGNORE_PATH = pathlib.Path(".gitignore")
+GITHUB_DIR = pathlib.Path(".github")
+SONAR_WORKFLOW_PATH = GITHUB_DIR / "workflows" / "sonar.yml"
+SONAR_PROJECT_PATH = pathlib.Path("sonar-project.properties")
+COMPOSE_PATH = pathlib.Path("compose.yml")
+CONFIG_DIR = pathlib.Path("config")
+DOCS_DIR = pathlib.Path("docs")
+ECS_DIR = pathlib.Path("ecs")
+SCRIPTS_DIR = pathlib.Path("scripts")
+
+CONTRACT_PATH = DOCS_DIR / "contracts" / "market-ingest-app-contract.md"
+COST_CONFIG_PATH = CONFIG_DIR / "cost.paper.toml"
+EXCHANGES_CONFIG_PATH = CONFIG_DIR / "exchanges.toml"
+UNIVERSE_CONFIG_PATH = CONFIG_DIR / "universe.major-50.toml"
+SERVICE_EXAMPLE_PATH = ECS_DIR / "service.example.json"
+TASK_DEFINITION_EXAMPLE_PATH = ECS_DIR / "task-definition.example.json"
+TASK_ROLE_POLICY_EXAMPLE_PATH = ECS_DIR / "task-role-policy.example.json"
+DEPLOY_SCRIPT_PATH = SCRIPTS_DIR / "deploy.sh"
+CHECK_RUNTIME_SCRIPT_PATH = SCRIPTS_DIR / "check-runtime.sh"
+CHECK_ECR_SCAN_SCRIPT_PATH = SCRIPTS_DIR / "check-ecr-scan.sh"
+RENDER_TASK_DEFINITION_SCRIPT_PATH = SCRIPTS_DIR / "render-ecs-task-definition.sh"
+DIAGNOSE_L1_STALENESS_SCRIPT_PATH = SCRIPTS_DIR / "diagnose-l1-staleness.sh"
+CHECK_REPOSITORY_CONTRACT_SCRIPT_PATH = SCRIPTS_DIR / "check-repository-contract.py"
+CHECK_RELEASE_READINESS_SCRIPT_PATH = SCRIPTS_DIR / "check-release-readiness.sh"
+PREPARE_RELEASE_ARTIFACTS_SCRIPT_PATH = SCRIPTS_DIR / "prepare-release-artifacts.sh"
+
+REQUIRED_PATHS = [
+    README_PATH,
+    DOCKERFILE_PATH,
+    DOCKERIGNORE_PATH,
+    GITIGNORE_PATH,
+    SONAR_WORKFLOW_PATH,
+    SONAR_PROJECT_PATH,
+    COMPOSE_PATH,
+    COST_CONFIG_PATH,
+    EXCHANGES_CONFIG_PATH,
+    UNIVERSE_CONFIG_PATH,
+    CONTRACT_PATH,
+    SERVICE_EXAMPLE_PATH,
+    TASK_DEFINITION_EXAMPLE_PATH,
+    TASK_ROLE_POLICY_EXAMPLE_PATH,
+    DEPLOY_SCRIPT_PATH,
+    CHECK_RUNTIME_SCRIPT_PATH,
+    CHECK_ECR_SCAN_SCRIPT_PATH,
+    RENDER_TASK_DEFINITION_SCRIPT_PATH,
+    DIAGNOSE_L1_STALENESS_SCRIPT_PATH,
+    CHECK_REPOSITORY_CONTRACT_SCRIPT_PATH,
+    CHECK_RELEASE_READINESS_SCRIPT_PATH,
+    PREPARE_RELEASE_ARTIFACTS_SCRIPT_PATH,
+]
+EXECUTABLE_PATHS = [
+    DEPLOY_SCRIPT_PATH,
+    CHECK_RUNTIME_SCRIPT_PATH,
+    CHECK_ECR_SCAN_SCRIPT_PATH,
+    RENDER_TASK_DEFINITION_SCRIPT_PATH,
+    DIAGNOSE_L1_STALENESS_SCRIPT_PATH,
+    CHECK_REPOSITORY_CONTRACT_SCRIPT_PATH,
+    CHECK_RELEASE_READINESS_SCRIPT_PATH,
+    PREPARE_RELEASE_ARTIFACTS_SCRIPT_PATH,
+]
+
+
 def fail(message: str) -> None:
     print(message, file=sys.stderr)
     sys.exit(1)
@@ -100,12 +165,18 @@ def check_task_definition_example(path: pathlib.Path) -> None:
 
 
 def check_required_phrases() -> None:
-    readme_text = pathlib.Path("README.md").read_text(encoding="utf-8")
-    dockerfile_text = pathlib.Path("Dockerfile").read_text(encoding="utf-8")
-    compose_text = pathlib.Path("compose.yml").read_text(encoding="utf-8")
-    contract_text = pathlib.Path("docs/contracts/market-ingest-app-contract.md").read_text(
-        encoding="utf-8"
-    )
+    readme_text = README_PATH.read_text(encoding="utf-8")
+    dockerfile_text = DOCKERFILE_PATH.read_text(encoding="utf-8")
+    compose_text = COMPOSE_PATH.read_text(encoding="utf-8")
+    contract_text = CONTRACT_PATH.read_text(encoding="utf-8")
+
+    contract_script_phrases = [
+        str(CHECK_REPOSITORY_CONTRACT_SCRIPT_PATH),
+        str(CHECK_RELEASE_READINESS_SCRIPT_PATH),
+        str(PREPARE_RELEASE_ARTIFACTS_SCRIPT_PATH),
+        str(RENDER_TASK_DEFINITION_SCRIPT_PATH),
+        str(DIAGNOSE_L1_STALENESS_SCRIPT_PATH),
+    ]
 
     required_contract_phrases = [
         (readme_text, "market-ingest-app은 현재 NATS subject를 직접 publish하지 않는다"),
@@ -119,65 +190,83 @@ def check_required_phrases() -> None:
         (contract_text, "capabilities.drop=[\"ALL\"]"),
         (contract_text, "runner_git_sha"),
         (contract_text, "runner_git_dirty"),
-        (contract_text, "scripts/check-repository-contract.py"),
-        (contract_text, "scripts/check-release-readiness.sh"),
-        (contract_text, "scripts/prepare-release-artifacts.sh"),
-        (contract_text, "scripts/render-ecs-task-definition.sh"),
-        (contract_text, "scripts/diagnose-l1-staleness.sh"),
         (contract_text, "CloudWatch metrics"),
         (contract_text, "CPU/Memory utilization thresholds"),
         (contract_text, "must not register the task"),
         (contract_text, "must not update ECS services"),
         (contract_text, "resolve the linux/arm64 child digest"),
     ]
+    required_contract_phrases.extend(
+        (contract_text, phrase) for phrase in contract_script_phrases
+    )
     for text, phrase in required_contract_phrases:
         if phrase not in text:
             fail(f"contract text missing required phrase: {phrase}")
 
 
-def check_public_leaks() -> None:
-    public_roots = [
+def public_roots() -> list[pathlib.Path]:
+    return [
         pathlib.Path(".env.example"),
-        pathlib.Path(".dockerignore"),
-        pathlib.Path(".gitignore"),
-        pathlib.Path(".github"),
-        pathlib.Path("compose.yml"),
-        pathlib.Path("config"),
-        pathlib.Path("Dockerfile"),
-        pathlib.Path("docs"),
-        pathlib.Path("ecs"),
-        pathlib.Path("README.md"),
-        pathlib.Path("scripts"),
-        pathlib.Path("sonar-project.properties"),
+        DOCKERIGNORE_PATH,
+        GITIGNORE_PATH,
+        GITHUB_DIR,
+        COMPOSE_PATH,
+        CONFIG_DIR,
+        DOCKERFILE_PATH,
+        DOCS_DIR,
+        ECS_DIR,
+        README_PATH,
+        SCRIPTS_DIR,
+        SONAR_PROJECT_PATH,
     ]
-    checks = [
-        ("aws_account_id", re.compile(r"\b[0-9]{12}\b")),
+
+
+def public_leak_checks() -> list[tuple[str, re.Pattern[str]]]:
+    return [
+        ("aws_account_id", re.compile(r"\b\d{12}\b")),
         (
             "actual_account_suffix_bucket",
-            re.compile(r"nangman-crypto-dev-[A-Za-z0-9-]+-[0-9]{6}\b"),
+            re.compile(r"nangman-crypto-dev-[A-Za-z0-9-]+-\d{6}\b"),
         ),
         ("administrator_access_profile", re.compile("Administrator" + r"Access-")),
         (
             "private_ipv4",
             re.compile(
                 r"\b(?:10|192\.168|172\.(?:1[6-9]|2[0-9]|3[0-1]))"
-                r"\.[0-9]{1,3}\.[0-9]{1,3}(?:\.[0-9]{1,3})?\b"
+                r"\.\d{1,3}\.\d{1,3}(?:\.\d{1,3})?\b"
             ),
         ),
-        ("private_ecr_uri", re.compile(r"\b[0-9]{12}\.dkr\.ecr\.")),
+        ("private_ecr_uri", re.compile(r"\b\d{12}\.dkr\.ecr\.")),
     ]
 
-    violations: list[str] = []
-    for root in public_roots:
-        paths = [root] if root.is_file() else sorted(path for path in root.rglob("*") if path.is_file())
-        for path in paths:
-            if ".git" in path.parts:
-                continue
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            for label, pattern in checks:
-                if pattern.search(text):
-                    violations.append(f"{path}: {label}")
 
+def iter_public_files(roots: list[pathlib.Path]) -> list[pathlib.Path]:
+    paths: list[pathlib.Path] = []
+    for root in roots:
+        if root.is_file():
+            paths.append(root)
+        else:
+            paths.extend(sorted(path for path in root.rglob("*") if path.is_file()))
+    return [path for path in paths if ".git" not in path.parts]
+
+
+def path_leak_violations(
+    path: pathlib.Path, checks: list[tuple[str, re.Pattern[str]]]
+) -> list[str]:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    return [f"{path}: {label}" for label, pattern in checks if pattern.search(text)]
+
+
+def find_public_leaks() -> list[str]:
+    violations: list[str] = []
+    checks = public_leak_checks()
+    for path in iter_public_files(public_roots()):
+        violations.extend(path_leak_violations(path, checks))
+    return violations
+
+
+def check_public_leaks() -> None:
+    violations = find_public_leaks()
     if violations:
         print("public contract leak check failed:")
         for violation in violations:
@@ -186,46 +275,11 @@ def check_public_leaks() -> None:
 
 
 def main() -> None:
-    required_paths = [
-        pathlib.Path("README.md"),
-        pathlib.Path("Dockerfile"),
-        pathlib.Path(".dockerignore"),
-        pathlib.Path(".gitignore"),
-        pathlib.Path(".github/workflows/sonar.yml"),
-        pathlib.Path("sonar-project.properties"),
-        pathlib.Path("compose.yml"),
-        pathlib.Path("config/cost.paper.toml"),
-        pathlib.Path("config/exchanges.toml"),
-        pathlib.Path("config/universe.major-50.toml"),
-        pathlib.Path("docs/contracts/market-ingest-app-contract.md"),
-        pathlib.Path("ecs/service.example.json"),
-        pathlib.Path("ecs/task-definition.example.json"),
-        pathlib.Path("ecs/task-role-policy.example.json"),
-        pathlib.Path("scripts/deploy.sh"),
-        pathlib.Path("scripts/check-runtime.sh"),
-        pathlib.Path("scripts/check-ecr-scan.sh"),
-        pathlib.Path("scripts/render-ecs-task-definition.sh"),
-        pathlib.Path("scripts/diagnose-l1-staleness.sh"),
-        pathlib.Path("scripts/check-repository-contract.py"),
-        pathlib.Path("scripts/check-release-readiness.sh"),
-        pathlib.Path("scripts/prepare-release-artifacts.sh"),
-    ]
-    executable_paths = [
-        pathlib.Path("scripts/deploy.sh"),
-        pathlib.Path("scripts/check-runtime.sh"),
-        pathlib.Path("scripts/check-ecr-scan.sh"),
-        pathlib.Path("scripts/render-ecs-task-definition.sh"),
-        pathlib.Path("scripts/diagnose-l1-staleness.sh"),
-        pathlib.Path("scripts/check-repository-contract.py"),
-        pathlib.Path("scripts/check-release-readiness.sh"),
-        pathlib.Path("scripts/prepare-release-artifacts.sh"),
-    ]
-
-    require_paths(required_paths)
-    require_executable(executable_paths)
-    check_service_example(pathlib.Path("ecs/service.example.json"))
-    check_task_definition_example(pathlib.Path("ecs/task-definition.example.json"))
-    load_json(pathlib.Path("ecs/task-role-policy.example.json"))
+    require_paths(REQUIRED_PATHS)
+    require_executable(EXECUTABLE_PATHS)
+    check_service_example(SERVICE_EXAMPLE_PATH)
+    check_task_definition_example(TASK_DEFINITION_EXAMPLE_PATH)
+    load_json(TASK_ROLE_POLICY_EXAMPLE_PATH)
     check_required_phrases()
     check_public_leaks()
     print("repository contract gate ok")
