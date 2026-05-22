@@ -17,13 +17,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const SELECTION_POLICY_VERSION: &str = "observed_liquidity_rank_p0_v1";
 const VENUE_TRUTH_POLICY_VERSION: &str = "execution_reference_split_p0_v1";
-const DATA_QUALITY_CUTOFF_VERSION: &str = "requires_30d_bootstrap_p0_v1";
+const DATA_QUALITY_CUTOFF_VERSION: &str = "requires_30d_or_reference_warmup_p0_v1";
 const FIFTEEN_MINUTES_MS: i64 = 900_000;
 const ONE_HOUR_MS: i64 = 3_600_000;
 const ONE_DAY_MS: i64 = 86_400_000;
 const MIN_BOOTSTRAP_DAYS: i64 = 30;
 const BOOTSTRAP_ROLLUP_DAYS: i64 = 30;
 const MAX_APPROVED_RANK: i64 = 50;
+const MIN_REFERENCE_WARMUP_BOOTSTRAP_DAYS: i64 = 1;
+const MAX_REFERENCE_WARMUP_RANK: i64 = 50;
 const MAX_MEDIAN_SPREAD_BPS: f64 = 50.0;
 const MAX_GAP_RATE: f64 = 0.05;
 
@@ -350,8 +352,14 @@ fn regime_context_for_window(
     let sector_return = mean(samples.iter().map(|sample| sample.return_pct));
     let volatility = population_stddev(samples.iter().map(|sample| sample.return_pct));
     let correlation_to_btc = rolling_correlation_to_btc(returns_by_window, window_start_ms);
-    let missing_reasons =
+    let mut missing_reasons =
         regime_missing_reasons(btc_return, eth_return, sector_return, correlation_to_btc);
+    if samples
+        .iter()
+        .any(|sample| sample.lookback_ms < ONE_HOUR_MS)
+    {
+        missing_reasons.push("return_lookback_degraded".to_owned());
+    }
     MarketRegimeContext {
         schema_version: MARKET_REGIME_CONTEXT_SCHEMA_VERSION.to_owned(),
         regime_context_id: stable_id(&[
@@ -961,10 +969,7 @@ fn liquidity_ranks(stats: &BTreeMap<String, SymbolStats>) -> Vec<SymbolLiquidity
         .values()
         .filter_map(|stat| {
             let notional = stat.median_traded_notional?;
-            if stat.bootstrap_days_available < MIN_BOOTSTRAP_DAYS
-                || !notional.is_finite()
-                || notional <= 0.0
-            {
+            if !is_liquidity_rank_eligible(stat, notional) {
                 return None;
             }
             Some((stat.symbol_canonical.clone(), notional))
@@ -1164,6 +1169,7 @@ struct ReturnSample {
     symbol_canonical: String,
     window_end_ms: i64,
     return_pct: f64,
+    lookback_ms: i64,
 }
 
 fn return_samples_by_window(slices: &[SliceRow]) -> BTreeMap<i64, Vec<ReturnSample>> {
@@ -1171,10 +1177,7 @@ fn return_samples_by_window(slices: &[SliceRow]) -> BTreeMap<i64, Vec<ReturnSamp
     let mut by_window = BTreeMap::<i64, Vec<ReturnSample>>::new();
     for rows in grouped.values() {
         for row in rows.iter().copied() {
-            if let Some(return_pct) = percent_change(
-                price(row),
-                value_at_or_before(rows, row.window_start_ms - ONE_HOUR_MS, price),
-            ) {
+            if let Some((return_pct, lookback_ms)) = return_sample_for_row(rows, row) {
                 by_window
                     .entry(row.window_start_ms)
                     .or_default()
@@ -1182,11 +1185,41 @@ fn return_samples_by_window(slices: &[SliceRow]) -> BTreeMap<i64, Vec<ReturnSamp
                         symbol_canonical: row.symbol_canonical.clone(),
                         window_end_ms: row.window_end_ms,
                         return_pct,
+                        lookback_ms,
                     });
             }
         }
     }
     by_window
+}
+
+fn return_sample_for_row(rows: &[&SliceRow], row: &SliceRow) -> Option<(f64, i64)> {
+    let current_price = price(row)?;
+    let target_start_ms = row.window_start_ms.saturating_sub(ONE_HOUR_MS);
+    let historical_price = price_with_window_at_or_before(rows, target_start_ms)
+        .or_else(|| nearest_prior_price_with_window(rows, row.window_start_ms))?;
+    let return_pct = percent_change(Some(current_price), Some(historical_price.0))?;
+    Some((
+        return_pct,
+        row.window_start_ms.saturating_sub(historical_price.1),
+    ))
+}
+
+fn price_with_window_at_or_before(rows: &[&SliceRow], target_ms: i64) -> Option<(f64, i64)> {
+    rows.iter()
+        .rev()
+        .find(|row| row.window_start_ms <= target_ms)
+        .and_then(|row| price(row).map(|value| (value, row.window_start_ms)))
+}
+
+fn nearest_prior_price_with_window(
+    rows: &[&SliceRow],
+    current_window_start_ms: i64,
+) -> Option<(f64, i64)> {
+    rows.iter()
+        .rev()
+        .find(|row| row.window_start_ms < current_window_start_ms)
+        .and_then(|row| price(row).map(|value| (value, row.window_start_ms)))
 }
 
 fn rolling_correlation_to_btc(
@@ -1284,11 +1317,27 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
 }
 
 fn is_approved_universe_symbol(stat: &SymbolStats, liquidity_rank: Option<i64>) -> bool {
+    is_fully_bootstrapped_universe_symbol(stat, liquidity_rank)
+        || is_reference_warmup_universe_symbol(stat, liquidity_rank)
+}
+
+fn is_fully_bootstrapped_universe_symbol(stat: &SymbolStats, liquidity_rank: Option<i64>) -> bool {
     stat.bootstrap_days_available >= MIN_BOOTSTRAP_DAYS
         && liquidity_rank.is_some_and(|rank| rank <= MAX_APPROVED_RANK)
-        && stat
-            .median_traded_notional
-            .is_some_and(|notional| notional > 0.0)
+        && passes_universe_quality(stat)
+}
+
+fn is_reference_warmup_universe_symbol(stat: &SymbolStats, liquidity_rank: Option<i64>) -> bool {
+    stat.bootstrap_days_available >= MIN_REFERENCE_WARMUP_BOOTSTRAP_DAYS
+        && stat.bootstrap_days_available < MIN_BOOTSTRAP_DAYS
+        && is_reference_warmup_symbol(stat)
+        && liquidity_rank.is_some_and(|rank| rank <= MAX_REFERENCE_WARMUP_RANK)
+        && passes_universe_quality(stat)
+}
+
+fn passes_universe_quality(stat: &SymbolStats) -> bool {
+    stat.median_traded_notional
+        .is_some_and(|notional| notional > 0.0)
         && stat
             .median_spread_bps
             .is_some_and(|spread| spread <= MAX_MEDIAN_SPREAD_BPS)
@@ -1297,12 +1346,33 @@ fn is_approved_universe_symbol(stat: &SymbolStats, liquidity_rank: Option<i64>) 
             .is_some_and(|gap_rate| gap_rate <= MAX_GAP_RATE)
 }
 
+fn is_liquidity_rank_eligible(stat: &SymbolStats, notional: f64) -> bool {
+    if !notional.is_finite() || notional <= 0.0 {
+        return false;
+    }
+    if stat.bootstrap_days_available >= MIN_BOOTSTRAP_DAYS {
+        return true;
+    }
+    stat.bootstrap_days_available >= MIN_REFERENCE_WARMUP_BOOTSTRAP_DAYS
+        && stat.bootstrap_days_available < MIN_BOOTSTRAP_DAYS
+        && is_reference_warmup_symbol(stat)
+}
+
+fn is_reference_warmup_symbol(stat: &SymbolStats) -> bool {
+    stat.reference_symbol_native
+        .as_deref()
+        .is_some_and(|symbol| symbol.ends_with("USDT") && !symbol.starts_with("KRW-"))
+}
+
 fn universe_status_reason(
     stat: &SymbolStats,
     liquidity_rank: Option<i64>,
     approved_universe_symbol: bool,
 ) -> String {
     if approved_universe_symbol {
+        if is_reference_warmup_universe_symbol(stat, liquidity_rank) {
+            return "approved_reference_warmup".to_owned();
+        }
         return "approved".to_owned();
     }
     if stat.bootstrap_days_available < MIN_BOOTSTRAP_DAYS {
@@ -1591,6 +1661,39 @@ mod tests {
     }
 
     #[test]
+    fn regime_context_uses_degraded_prior_return_when_one_hour_history_missing() {
+        let slices = vec![
+            slice_at("binance", "BTC", "BTCUSDT", 1.0, 100.0, "complete", 0),
+            slice_at("binance", "ETH", "ETHUSDT", 1.0, 200.0, "complete", 0),
+            slice_at("binance", "SUI", "SUIUSDT", 1.0, 10.0, "complete", 0),
+            slice_at("binance", "BTC", "BTCUSDT", 1.0, 101.0, "complete", 300_000),
+            slice_at("binance", "ETH", "ETHUSDT", 1.0, 204.0, "complete", 300_000),
+            slice_at("binance", "SUI", "SUIUSDT", 1.0, 11.0, "complete", 300_000),
+        ];
+
+        let contexts = build_market_regime_contexts(
+            "run-1",
+            InputRange {
+                start_ms: 300_000,
+                end_ms: 301_000,
+            },
+            301_500,
+            &slices,
+        );
+
+        let context = contexts.first().expect("short-lookback context exists");
+        assert!(context.btc_return_same_window.is_some());
+        assert!(context.eth_return_same_window.is_some());
+        assert!(context.sector_return_same_window.is_some());
+        assert_eq!(context.quality_status, "partial");
+        assert!(
+            context
+                .missing_reasons
+                .contains(&"return_lookback_degraded".to_owned())
+        );
+    }
+
+    #[test]
     fn universe_snapshot_approves_top_liquid_symbol_after_actual_30d_bootstrap() {
         let slices = (0..30)
             .map(|day| {
@@ -1620,6 +1723,47 @@ mod tests {
         assert_eq!(snapshot.included_symbols[0].symbol_canonical, "SUI");
         assert!(snapshot.included_symbols[0].approved_universe_symbol);
         assert_eq!(snapshot.included_symbols[0].bootstrap_days_available, 30);
+    }
+
+    #[test]
+    fn universe_snapshot_approves_reference_warmup_symbol() {
+        let rollups = vec![
+            build_symbol_universe_bootstrap_rollups(
+                "btc-warmup-run",
+                InputRange {
+                    start_ms: 0,
+                    end_ms: 900_000,
+                },
+                900_000,
+                &[slice_at(
+                    "binance", "BTC", "BTCUSDT", 1_000.0, 100.0, "complete", 0,
+                )],
+            )
+            .remove(0),
+        ];
+        let current_slices = vec![slice_at(
+            "binance", "BTC", "BTCUSDT", 1_000.0, 100.0, "complete", 0,
+        )];
+
+        let snapshot = build_symbol_universe_snapshot_from_bootstrap(
+            "run-current",
+            InputRange {
+                start_ms: 0,
+                end_ms: 900_000,
+            },
+            900_000,
+            &current_slices,
+            &rollups,
+        );
+
+        assert_eq!(snapshot.included_symbols.len(), 1);
+        assert_eq!(snapshot.included_symbols[0].symbol_canonical, "BTC");
+        assert!(snapshot.included_symbols[0].approved_universe_symbol);
+        assert_eq!(snapshot.included_symbols[0].bootstrap_days_available, 1);
+        assert_eq!(
+            snapshot.included_symbols[0].status_reason,
+            "approved_reference_warmup"
+        );
     }
 
     #[test]
