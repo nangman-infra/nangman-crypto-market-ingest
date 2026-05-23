@@ -300,6 +300,29 @@ MARKET_L1_BUCKET="nangman-crypto-dev-market-ingest-l1-<account-suffix>" \
 `bootstrap_spread_samples_present`, `bootstrap_symbol_coverage_incomplete`를 구분한다.
 서비스 업데이트, normalize 실행, S3 쓰기, S3 삭제는 수행하지 않는다.
 
+**로컬 bootstrap admission preview**:
+
+```bash
+cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
+MARKET_UNIVERSE_BOOTSTRAP_PREVIEW_DIR="/tmp/nangman-crypto/market-universe-bootstrap/symbol_universe_snapshot/bootstrap_rollup" \
+./scripts/preview-universe-bootstrap-admission.sh
+```
+
+로컬 seed와 이미 별도로 내려받은 live rollup을 겹쳐 보고 싶으면 overlay directory를
+추가한다. 같은 `event_date`가 있으면 overlay rollup이 우선한다.
+
+```bash
+cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
+MARKET_UNIVERSE_BOOTSTRAP_PREVIEW_DIR="/tmp/nangman-crypto/market-universe-bootstrap/symbol_universe_snapshot/bootstrap_rollup" \
+MARKET_UNIVERSE_BOOTSTRAP_PREVIEW_OVERLAY_DIR="/tmp/nangman-crypto/live-rollups/symbol_universe_snapshot/bootstrap_rollup" \
+./scripts/preview-universe-bootstrap-admission.sh
+```
+
+이 스크립트는 bootstrap seed를 S3에 올리기 전에 해당 seed가 30일 universe
+approval을 몇 개 심볼까지 열 수 있는지 미리 계산한다.
+`would_open_current_approved_subset`과 `would_open_full_major50_approval`을 분리해서
+보여준다. AWS 호출, S3 업로드, S3 삭제, normalize 실행은 수행하지 않는다.
+
 **읽기 전용 ECR scan check**:
 
 ```bash
