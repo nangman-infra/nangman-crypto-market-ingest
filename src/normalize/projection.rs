@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const SELECTION_POLICY_VERSION: &str = "observed_liquidity_rank_p0_v1";
 const VENUE_TRUTH_POLICY_VERSION: &str = "execution_reference_split_p0_v1";
-const DATA_QUALITY_CUTOFF_VERSION: &str = "requires_30d_or_reference_warmup_p0_v1";
+const DATA_QUALITY_CUTOFF_VERSION: &str = "requires_30d_bootstrap_p0_v1";
 const FIFTEEN_MINUTES_MS: i64 = 900_000;
 const ONE_HOUR_MS: i64 = 3_600_000;
 const ONE_DAY_MS: i64 = 86_400_000;
@@ -25,7 +25,6 @@ const MIN_BOOTSTRAP_DAYS: i64 = 30;
 const BOOTSTRAP_ROLLUP_DAYS: i64 = 30;
 const MAX_APPROVED_RANK: i64 = 50;
 const MIN_REFERENCE_WARMUP_BOOTSTRAP_DAYS: i64 = 1;
-const MAX_REFERENCE_WARMUP_RANK: i64 = 50;
 const MAX_MEDIAN_SPREAD_BPS: f64 = 50.0;
 const MAX_GAP_RATE: f64 = 0.05;
 
@@ -1318,20 +1317,11 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
 
 fn is_approved_universe_symbol(stat: &SymbolStats, liquidity_rank: Option<i64>) -> bool {
     is_fully_bootstrapped_universe_symbol(stat, liquidity_rank)
-        || is_reference_warmup_universe_symbol(stat, liquidity_rank)
 }
 
 fn is_fully_bootstrapped_universe_symbol(stat: &SymbolStats, liquidity_rank: Option<i64>) -> bool {
     stat.bootstrap_days_available >= MIN_BOOTSTRAP_DAYS
         && liquidity_rank.is_some_and(|rank| rank <= MAX_APPROVED_RANK)
-        && passes_universe_quality(stat)
-}
-
-fn is_reference_warmup_universe_symbol(stat: &SymbolStats, liquidity_rank: Option<i64>) -> bool {
-    stat.bootstrap_days_available >= MIN_REFERENCE_WARMUP_BOOTSTRAP_DAYS
-        && stat.bootstrap_days_available < MIN_BOOTSTRAP_DAYS
-        && is_reference_warmup_symbol(stat)
-        && liquidity_rank.is_some_and(|rank| rank <= MAX_REFERENCE_WARMUP_RANK)
         && passes_universe_quality(stat)
 }
 
@@ -1370,9 +1360,6 @@ fn universe_status_reason(
     approved_universe_symbol: bool,
 ) -> String {
     if approved_universe_symbol {
-        if is_reference_warmup_universe_symbol(stat, liquidity_rank) {
-            return "approved_reference_warmup".to_owned();
-        }
         return "approved".to_owned();
     }
     if stat.bootstrap_days_available < MIN_BOOTSTRAP_DAYS {
@@ -1726,7 +1713,7 @@ mod tests {
     }
 
     #[test]
-    fn universe_snapshot_approves_reference_warmup_symbol() {
+    fn universe_snapshot_rejects_reference_warmup_without_30d_bootstrap() {
         let rollups = vec![
             build_symbol_universe_bootstrap_rollups(
                 "btc-warmup-run",
@@ -1756,13 +1743,14 @@ mod tests {
             &rollups,
         );
 
-        assert_eq!(snapshot.included_symbols.len(), 1);
-        assert_eq!(snapshot.included_symbols[0].symbol_canonical, "BTC");
-        assert!(snapshot.included_symbols[0].approved_universe_symbol);
-        assert_eq!(snapshot.included_symbols[0].bootstrap_days_available, 1);
+        assert!(snapshot.included_symbols.is_empty());
+        assert_eq!(snapshot.excluded_symbols.len(), 1);
+        assert_eq!(snapshot.excluded_symbols[0].symbol_canonical, "BTC");
+        assert!(!snapshot.excluded_symbols[0].approved_universe_symbol);
+        assert_eq!(snapshot.excluded_symbols[0].bootstrap_days_available, 1);
         assert_eq!(
-            snapshot.included_symbols[0].status_reason,
-            "approved_reference_warmup"
+            snapshot.excluded_symbols[0].status_reason,
+            "insufficient_30d_bootstrap"
         );
     }
 
