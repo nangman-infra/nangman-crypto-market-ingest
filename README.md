@@ -368,7 +368,7 @@ config, Rust fmt/clippy/test, linux/arm64 Docker build, image smoke를 한 번�
 ```text
 capacity:     FARGATE_SPOT (weight=1, base=0)
 platform:     LINUX/ARM64
-size:         2 vCPU / 4 GB  (210일 bootstrap 진행 중일 때)
+size:         2 vCPU / 8 GB  (210일 bootstrap 진행 중일 때)
 log retention: 3 days
 ECR lifecycle: 최신 5개 image 보존
 image:        distroless runtime
