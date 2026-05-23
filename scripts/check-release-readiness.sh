@@ -45,6 +45,7 @@ run_script_syntax_checks() {
   bash -n scripts/check-ecr-scan.sh
   bash -n scripts/render-ecs-task-definition.sh
   bash -n scripts/diagnose-l1-staleness.sh
+  bash -n scripts/check-universe-readiness.sh
   bash -n scripts/prepare-release-artifacts.sh
   python3 -m py_compile scripts/check-repository-contract.py
 }

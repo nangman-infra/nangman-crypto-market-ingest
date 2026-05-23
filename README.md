@@ -284,6 +284,22 @@ shape, 최근 CloudWatch lifecycle count, 최신 lifecycle sample, 최근 L0/L1 
 prefix sample을 같이 출력한다. ECS update, task restart, ECR push, S3 object
 삭제나 쓰기는 수행하지 않는다.
 
+**읽기 전용 universe readiness check**:
+
+```bash
+cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
+AWS_PROFILE="${AWS_PROFILE}" \
+MARKET_L1_BUCKET="nangman-crypto-dev-market-ingest-l1-<account-suffix>" \
+./scripts/check-universe-readiness.sh
+```
+
+이 스크립트는 `symbol_universe_snapshot_v1`과 최근
+`symbol_universe_bootstrap_rollup_v1`만 읽어서 major-50 universe가 어느 단계에서
+막혔는지 분리한다. 특히 `configured_major50_observed`, `major50_observed`,
+`major50_approved`, `missing_configured_symbols`,
+`bootstrap_spread_samples_present`, `bootstrap_symbol_coverage_incomplete`를 구분한다.
+서비스 업데이트, normalize 실행, S3 쓰기, S3 삭제는 수행하지 않는다.
+
 **읽기 전용 ECR scan check**:
 
 ```bash

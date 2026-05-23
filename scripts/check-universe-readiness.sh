@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-ap-northeast-2}}"
+MARKET_L1_BUCKET="${MARKET_L1_BUCKET:-${L1_S3_BUCKET:-}}"
+EXPECTED_UNIVERSE_SIZE="${MARKET_UNIVERSE_EXPECTED_SIZE:-50}"
+ROLLUP_READ_LIMIT="${MARKET_UNIVERSE_ROLLUP_READ_LIMIT:-30}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+UNIVERSE_CONFIG="${MARKET_UNIVERSE_CONFIG:-$REPO_ROOT/config/universe.major-50.toml}"
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+redact() {
+  sed -E \
+    -e 's/nangman-crypto-dev-[A-Za-z0-9-]+-[0-9]{6}/nangman-crypto-dev-<bucket-family>-<account-suffix>/g' \
+    -e 's/[0-9]{12}\.dkr\.ecr/<aws-account-id>.dkr.ecr/g' \
+    -e 's/account=[0-9]{12}/account=<aws-account-id>/g' \
+    -e 's/"Account"[[:space:]]*:[[:space:]]*"[0-9]{12}"/"Account":"<aws-account-id>"/g'
+}
+
+aws_cmd() {
+  aws --region "$REGION" "$@"
+}
+
+verify_aws_access() {
+  local identity_output
+  if ! identity_output="$(aws_cmd sts get-caller-identity --output json 2>&1)"; then
+    {
+      echo "AWS credentials unavailable or expired for region=$REGION"
+      echo "Refresh the AWS login/session, then rerun this check."
+      echo "$identity_output"
+    } | redact >&2
+    exit 1
+  fi
+
+  echo "aws identity ok: account=$(jq -r '.Account' <<<"$identity_output")" | redact
+}
+
+require_command aws
+require_command jq
+require_command sed
+require_command mktemp
+
+if [[ -z "$MARKET_L1_BUCKET" || "$MARKET_L1_BUCKET" == *"<"* ]]; then
+  echo "MARKET_L1_BUCKET or L1_S3_BUCKET must be set to a real bucket" >&2
+  exit 1
+fi
+
+echo "== market-ingest universe readiness =="
+echo "region=$REGION"
+echo "market_l1_bucket=$MARKET_L1_BUCKET" | redact
+echo "universe_config=$UNIVERSE_CONFIG"
+echo "expected_universe_size=$EXPECTED_UNIVERSE_SIZE"
+echo "rollup_read_limit=$ROLLUP_READ_LIMIT"
+echo
+
+verify_aws_access
+
+snapshot_object_json="$(mktemp)"
+snapshot_json="$(mktemp)"
+rollup_objects_json="$(mktemp)"
+rollup_keys="$(mktemp)"
+rollup_records_json="$(mktemp)"
+configured_symbols_json="$(mktemp)"
+trap 'rm -f "$snapshot_object_json" "$snapshot_json" "$rollup_objects_json" "$rollup_keys" "$rollup_records_json" "$configured_symbols_json"' EXIT
+
+if [[ -f "$UNIVERSE_CONFIG" ]]; then
+  sed -nE 's/^base = "([^"]+)"/\1/p' "$UNIVERSE_CONFIG" \
+  | jq -R -s -c 'split("\n") | map(select(length > 0)) | unique' \
+  > "$configured_symbols_json"
+else
+  printf '[]\n' > "$configured_symbols_json"
+fi
+
+aws_cmd s3api list-objects-v2 \
+  --bucket "$MARKET_L1_BUCKET" \
+  --prefix "symbol_universe_snapshot/run_id=" \
+  --output json \
+| jq -c '
+    (.Contents // []) | sort_by(.LastModified, .Key) | last as $last
+    | if $last == null then
+        {lastModified:null,size:null,key:null}
+      else
+        {lastModified:$last.LastModified,size:$last.Size,key:$last.Key}
+      end
+  ' > "$snapshot_object_json"
+
+snapshot_key="$(jq -r '.key // empty' "$snapshot_object_json")"
+if [[ -n "$snapshot_key" ]]; then
+  aws_cmd s3 cp "s3://${MARKET_L1_BUCKET}/${snapshot_key}" - > "$snapshot_json"
+else
+  printf '{}\n' > "$snapshot_json"
+fi
+
+snapshot_universe_as_of_ms="$(jq -r '.universe_as_of_ms // empty' "$snapshot_json")"
+if [[ -n "$snapshot_universe_as_of_ms" ]]; then
+  jq -n -r \
+    --argjson end_ms "$snapshot_universe_as_of_ms" \
+    --argjson limit "$ROLLUP_READ_LIMIT" '
+      range(0; $limit)
+      | "symbol_universe_snapshot/bootstrap_rollup/event_date="
+        + (((($end_ms - 1) / 1000) - (. * 86400)) | strftime("%Y-%m-%d"))
+        + "/latest.json"
+    ' > "$rollup_keys"
+else
+  aws_cmd s3api list-objects-v2 \
+    --bucket "$MARKET_L1_BUCKET" \
+    --prefix "symbol_universe_snapshot/bootstrap_rollup/event_date=" \
+    --output json \
+  | jq -r --argjson limit "$ROLLUP_READ_LIMIT" '
+      (.Contents // []) | sort_by(.Key) | reverse | .[0:$limit][]?.Key
+    ' > "$rollup_keys"
+fi
+
+: > "$rollup_records_json"
+while IFS= read -r key; do
+  [[ -z "$key" ]] && continue
+  event_date="${key#*event_date=}"
+  event_date="${event_date%%/*}"
+  if ! rollup_body="$(aws_cmd s3 cp "s3://${MARKET_L1_BUCKET}/${key}" - 2>/dev/null)"; then
+    jq -n -c --arg key "$key" --arg event_date "$event_date" '{
+      key:$key,
+      event_date:$event_date,
+      missing:true,
+      source_window_count:0,
+      symbol_count:0,
+      symbols_with_notional:0,
+      symbols_with_spread_samples:0,
+      top_missing_spread_symbols:[]
+    }' >> "$rollup_records_json"
+    continue
+  fi
+  jq -c --arg key "$key" '{
+      key:$key,
+      missing:false,
+      event_date,
+      source_window_count:((.source_windows // []) | length),
+      symbol_count:((.symbols // []) | length),
+      symbols_with_notional:([
+        (.symbols // [])[]? | select((.traded_notional_sum // 0) > 0)
+      ] | length),
+      symbols_with_spread_samples:([
+        (.symbols // [])[]? | select(((.spread_bps_median_samples // []) | length) > 0)
+      ] | length),
+      top_missing_spread_symbols:[
+        (.symbols // [])[]?
+        | select(((.spread_bps_median_samples // []) | length) == 0)
+        | .symbol_canonical
+      ][0:10]
+    }' <<<"$rollup_body" >> "$rollup_records_json"
+done < "$rollup_keys"
+
+snapshot_summary="$(
+  jq -c \
+    --argjson object "$(cat "$snapshot_object_json")" \
+    --argjson configured "$(cat "$configured_symbols_json")" \
+    --argjson expected "$EXPECTED_UNIVERSE_SIZE" '
+      def status_reason_counts:
+        ((.included_symbols // []) + (.excluded_symbols // []))
+        | map(.status_reason // "unknown")
+        | group_by(.)
+        | map({reason:.[0], count:length})
+        | sort_by(.count)
+        | reverse;
+      def observed_count:
+        ((.liquidity_rank_at_that_time // []) | length);
+      def snapshot_symbols:
+        [
+          (.liquidity_rank_at_that_time // [])[]?.symbol_canonical,
+          (.included_symbols // [])[]?.symbol_canonical,
+          (.excluded_symbols // [])[]?.symbol_canonical
+        ] | unique;
+      if $object.key == null then
+        {
+          present:false,
+          key:null,
+          last_modified:null,
+          configured_universe_symbol_count:($configured | length),
+          observed_symbol_count:0,
+          approved_symbol_count:0,
+          excluded_symbol_count:0,
+          observed_complete:false,
+          approved_complete:false,
+          configured_symbols:$configured,
+          missing_configured_symbols:$configured,
+          unexpected_snapshot_symbols:[],
+          status_reason_counts:[]
+        }
+      else
+        {
+          present:true,
+          key:$object.key,
+          last_modified:$object.lastModified,
+          schema_version,
+          symbol_universe_snapshot_id,
+          universe_as_of_ms,
+          configured_universe_symbol_count:($configured | length),
+          observed_symbol_count:observed_count,
+          approved_symbol_count:((.included_symbols // []) | length),
+          excluded_symbol_count:((.excluded_symbols // []) | length),
+          observed_complete:(observed_count >= $expected),
+          approved_complete:(((.included_symbols // []) | length) >= $expected),
+          configured_symbols:$configured[0:$expected],
+          missing_configured_symbols:($configured - snapshot_symbols),
+          unexpected_snapshot_symbols:(snapshot_symbols - $configured),
+          top_observed_symbols:[(.liquidity_rank_at_that_time // [])[]?.symbol_canonical][0:$expected],
+          approved_symbols:[(.included_symbols // [])[]?.symbol_canonical][0:$expected],
+          status_reason_counts:status_reason_counts
+        }
+      end
+    ' "$snapshot_json"
+)"
+
+rollup_summary="$(jq -s -c --argjson expected "$EXPECTED_UNIVERSE_SIZE" --argjson limit "$ROLLUP_READ_LIMIT" '{
+  analyzed_rollup_count:length,
+  expected_rollup_count:$limit,
+  present_rollup_count:([.[] | select((.missing // false) == false)] | length),
+  missing_rollup_count:([.[] | select(.missing == true)] | length),
+  event_dates:[.[].event_date],
+  min_symbol_count:([.[].symbol_count] | min // 0),
+  max_symbol_count:([.[].symbol_count] | max // 0),
+  min_symbols_with_notional:([.[].symbols_with_notional] | min // 0),
+  max_symbols_with_notional:([.[].symbols_with_notional] | max // 0),
+  min_symbols_with_spread_samples:([.[].symbols_with_spread_samples] | min // 0),
+  max_symbols_with_spread_samples:([.[].symbols_with_spread_samples] | max // 0),
+  rollups_with_complete_symbol_coverage:([.[] | select(.symbol_count >= $expected)] | length),
+  rollups_with_any_spread_samples:([.[] | select(.symbols_with_spread_samples > 0)] | length),
+  latest_rollups:.[0:5]
+}' "$rollup_records_json")"
+
+jq -n \
+  --arg region "$REGION" \
+  --arg bucket "$MARKET_L1_BUCKET" \
+  --argjson expected "$EXPECTED_UNIVERSE_SIZE" \
+  --argjson snapshot "$snapshot_summary" \
+  --argjson rollups "$rollup_summary" \
+  '{
+    region:$region,
+    market_l1_bucket:$bucket,
+    expected_universe_size:$expected,
+    stage_state:{
+      latest_snapshot_present:$snapshot.present,
+      configured_major50_fixed:($snapshot.configured_universe_symbol_count == $expected),
+      configured_major50_observed:(($snapshot.missing_configured_symbols | length) == 0),
+      major50_observed:$snapshot.observed_complete,
+      major50_approved:$snapshot.approved_complete,
+      bootstrap_rollups_present:($rollups.present_rollup_count == $rollups.expected_rollup_count),
+      bootstrap_notional_present:($rollups.min_symbols_with_notional > 0),
+      bootstrap_spread_samples_present:($rollups.min_symbols_with_spread_samples > 0)
+    },
+    latest_snapshot:$snapshot,
+    recent_bootstrap_rollups:$rollups,
+    bottlenecks:([
+      if ($snapshot.present | not) then "symbol_universe_snapshot_absent" else empty end,
+      if ($snapshot.configured_universe_symbol_count != $expected) then "major50_config_file_not_expected_size" else empty end,
+      if (($snapshot.missing_configured_symbols | length) > 0) then "major50_config_symbols_missing_from_snapshot" else empty end,
+      if ($snapshot.observed_complete | not) then "major50_observed_universe_incomplete" else empty end,
+      if ($snapshot.approved_complete | not) then "major50_approved_universe_incomplete" else empty end,
+      if ($rollups.present_rollup_count < $rollups.expected_rollup_count) then "bootstrap_rollups_missing_for_snapshot_window" else empty end,
+      if ($rollups.min_symbol_count < $expected) then "bootstrap_symbol_coverage_incomplete" else empty end,
+      if ($rollups.min_symbols_with_spread_samples == 0) then "bootstrap_spread_samples_absent_for_snapshot_window" else empty end
+    ])
+  }' | redact
+
+echo "market-ingest universe readiness check completed"

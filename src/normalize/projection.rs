@@ -1387,10 +1387,10 @@ fn universe_status_reason(
     {
         return "missing_30d_traded_notional".to_owned();
     }
-    if !stat
-        .median_spread_bps
-        .is_some_and(|spread| spread <= MAX_MEDIAN_SPREAD_BPS)
-    {
+    let Some(median_spread_bps) = stat.median_spread_bps else {
+        return "missing_30d_spread".to_owned();
+    };
+    if median_spread_bps > MAX_MEDIAN_SPREAD_BPS {
         return "spread_too_wide_30d".to_owned();
     }
     if !stat
@@ -1814,6 +1814,84 @@ mod tests {
         assert_eq!(snapshot.included_symbols.len(), 1);
         assert_eq!(snapshot.included_symbols[0].symbol_canonical, "SUI");
         assert_eq!(snapshot.included_symbols[0].bootstrap_days_available, 30);
+    }
+
+    #[test]
+    fn universe_snapshot_reports_missing_spread_separately_from_wide_spread() {
+        let mut rollups = (0..30)
+            .map(|day| {
+                let mut rollup = build_symbol_universe_bootstrap_rollups(
+                    &format!("run-{day}"),
+                    InputRange {
+                        start_ms: day * ONE_DAY_MS,
+                        end_ms: day * ONE_DAY_MS + 900_000,
+                    },
+                    day * ONE_DAY_MS + 900_000,
+                    &[slice_at(
+                        "binance",
+                        "SUI",
+                        "SUIUSDT",
+                        1_000.0,
+                        10.0,
+                        "complete",
+                        day * ONE_DAY_MS,
+                    )],
+                )
+                .remove(0);
+                for symbol in &mut rollup.symbols {
+                    symbol.spread_bps_median_samples.clear();
+                }
+                rollup
+            })
+            .collect::<Vec<_>>();
+
+        let current_slices = vec![slice_at(
+            "binance",
+            "SUI",
+            "SUIUSDT",
+            1_000.0,
+            10.0,
+            "complete",
+            29 * ONE_DAY_MS,
+        )];
+        let snapshot = build_symbol_universe_snapshot_from_bootstrap(
+            "run-current",
+            InputRange {
+                start_ms: 29 * ONE_DAY_MS,
+                end_ms: 29 * ONE_DAY_MS + 900_000,
+            },
+            29 * ONE_DAY_MS + 900_000,
+            &current_slices,
+            &rollups,
+        );
+
+        assert!(snapshot.included_symbols.is_empty());
+        assert_eq!(snapshot.excluded_symbols.len(), 1);
+        assert_eq!(snapshot.excluded_symbols[0].bootstrap_days_available, 30);
+        assert_eq!(snapshot.excluded_symbols[0].median_spread_bps_30d, None);
+        assert_eq!(
+            snapshot.excluded_symbols[0].status_reason,
+            "missing_30d_spread"
+        );
+        for rollup in &mut rollups {
+            for symbol in &mut rollup.symbols {
+                symbol.spread_bps_median_samples = vec![MAX_MEDIAN_SPREAD_BPS + 1.0];
+            }
+        }
+        let wide_snapshot = build_symbol_universe_snapshot_from_bootstrap(
+            "run-current-wide",
+            InputRange {
+                start_ms: 29 * ONE_DAY_MS,
+                end_ms: 29 * ONE_DAY_MS + 900_000,
+            },
+            29 * ONE_DAY_MS + 900_000,
+            &current_slices,
+            &rollups,
+        );
+        assert_eq!(
+            wide_snapshot.excluded_symbols[0].status_reason,
+            "spread_too_wide_30d"
+        );
     }
 
     #[test]
