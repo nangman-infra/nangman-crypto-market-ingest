@@ -296,13 +296,82 @@ rollup_summary="$(jq -s -c \
   --argjson expected "$EXPECTED_UNIVERSE_SIZE" \
   --argjson limit "$ROLLUP_READ_LIMIT" \
   --argjson configured "$(cat "$configured_symbols_json")" '
+  def epoch_day($date):
+    (($date | strptime("%Y-%m-%d") | mktime) / 86400 | floor);
+  def date_after_days($date; $days):
+    (($date | strptime("%Y-%m-%d") | mktime) + ($days * 86400) | strftime("%Y-%m-%d"));
+  def max_date_or_null:
+    if length == 0 then null else sort | last end;
+
   . as $rollups
+  | ([.[].event_date] | sort) as $event_dates
+  | ($event_dates[0] // null) as $window_start_date
+  | ($event_dates[-1] // null) as $latest_event_date
+  | [
+      $configured[] as $symbol
+      | {
+          symbol:$symbol,
+          missing_event_dates:[
+            $rollups[]
+            | select(((.symbols // []) | index($symbol)) == null)
+            | .event_date
+          ],
+          missing_notional_event_dates:[
+            $rollups[]
+            | select(((.symbols_with_notional_list // []) | index($symbol)) == null)
+            | .event_date
+          ],
+          missing_spread_event_dates:[
+            $rollups[]
+            | select(((.symbols_with_spread_samples_list // []) | index($symbol)) == null)
+            | .event_date
+          ]
+        }
+      | . + {
+          missing_day_count:(.missing_event_dates | length),
+          missing_notional_day_count:(.missing_notional_event_dates | length),
+          missing_spread_day_count:(.missing_spread_event_dates | length)
+        }
+      | (
+          [
+            (.missing_event_dates[]?),
+            (.missing_notional_event_dates[]?),
+            (.missing_spread_event_dates[]?)
+          ]
+          | unique
+          | max_date_or_null
+        ) as $latest_missing_date
+      | . + {
+          bootstrap_window_start_event_date:$window_start_date,
+          latest_event_date:$latest_event_date,
+          latest_missing_event_date:$latest_missing_date,
+          additional_complete_days_required:(
+            if $latest_missing_date == null or $window_start_date == null then 0
+            else ((epoch_day($latest_missing_date) - epoch_day($window_start_date) + 1) | if . < 0 then 0 else . end)
+            end
+          )
+        }
+      | . + {
+          estimated_full_bootstrap_event_date:(
+            if .additional_complete_days_required == 0 or $latest_event_date == null then null
+            else date_after_days($latest_event_date; .additional_complete_days_required)
+            end
+          )
+        }
+      | select(
+          .missing_day_count > 0
+          or .missing_notional_day_count > 0
+          or .missing_spread_day_count > 0
+        )
+    ] as $missing_symbol_days
   | {
   analyzed_rollup_count:length,
   expected_rollup_count:$limit,
   present_rollup_count:([.[] | select((.missing // false) == false)] | length),
   missing_rollup_count:([.[] | select(.missing == true)] | length),
   event_dates:[.[].event_date],
+  bootstrap_window_start_event_date:$window_start_date,
+  latest_event_date:$latest_event_date,
   min_symbol_count:([.[].symbol_count] | min // 0),
   max_symbol_count:([.[].symbol_count] | max // 0),
   min_symbols_with_notional:([.[].symbols_with_notional] | min // 0),
@@ -328,37 +397,27 @@ rollup_summary="$(jq -s -c \
         missing_spread_symbols:($configured - (.symbols_with_spread_samples_list // []))
       }
   ],
-  missing_symbol_days:[
-    $configured[] as $symbol
-    | {
-        symbol:$symbol,
-        missing_event_dates:[
-          $rollups[]
-          | select(((.symbols // []) | index($symbol)) == null)
-          | .event_date
-        ],
-        missing_notional_event_dates:[
-          $rollups[]
-          | select(((.symbols_with_notional_list // []) | index($symbol)) == null)
-          | .event_date
-        ],
-        missing_spread_event_dates:[
-          $rollups[]
-          | select(((.symbols_with_spread_samples_list // []) | index($symbol)) == null)
-          | .event_date
-        ]
-      }
-    | . + {
-        missing_day_count:(.missing_event_dates | length),
-        missing_notional_day_count:(.missing_notional_event_dates | length),
-        missing_spread_day_count:(.missing_spread_event_dates | length)
-      }
-    | select(
-        .missing_day_count > 0
-        or .missing_notional_day_count > 0
-        or .missing_spread_day_count > 0
-      )
-  ],
+  missing_symbol_days:$missing_symbol_days,
+  bootstrap_approval_projection:{
+    full_major50_blocked_by_missing_symbol_days:(($missing_symbol_days | length) > 0),
+    blocking_symbol_count:($missing_symbol_days | length),
+    latest_estimated_full_bootstrap_event_date:(
+      [$missing_symbol_days[]?.estimated_full_bootstrap_event_date]
+      | map(select(. != null))
+      | max_date_or_null
+    ),
+    blocking_symbols:(
+      $missing_symbol_days
+      | map({
+          symbol,
+          latest_missing_event_date,
+          additional_complete_days_required,
+          estimated_full_bootstrap_event_date
+        })
+      | sort_by(.additional_complete_days_required, .symbol)
+      | reverse
+    )
+  },
   latest_rollups:.[0:5]
 }' "$rollup_records_json")"
 
