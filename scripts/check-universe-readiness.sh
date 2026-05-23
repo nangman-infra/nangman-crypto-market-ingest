@@ -170,6 +170,9 @@ while IFS= read -r key; do
       symbol_count:0,
       symbols_with_notional:0,
       symbols_with_spread_samples:0,
+      symbols:[],
+      symbols_with_notional_list:[],
+      symbols_with_spread_samples_list:[],
       top_missing_spread_symbols:[]
     }' >> "$rollup_records_json"
     continue
@@ -186,6 +189,15 @@ while IFS= read -r key; do
       symbols_with_spread_samples:([
         (.symbols // [])[]? | select(((.spread_bps_median_samples // []) | length) > 0)
       ] | length),
+      symbols:[(.symbols // [])[]?.symbol_canonical],
+      symbols_with_notional_list:[
+        (.symbols // [])[]? | select((.traded_notional_sum // 0) > 0) | .symbol_canonical
+      ],
+      symbols_with_spread_samples_list:[
+        (.symbols // [])[]?
+        | select(((.spread_bps_median_samples // []) | length) > 0)
+        | .symbol_canonical
+      ],
       top_missing_spread_symbols:[
         (.symbols // [])[]?
         | select(((.spread_bps_median_samples // []) | length) == 0)
@@ -228,6 +240,8 @@ snapshot_summary="$(
           configured_symbols:$configured,
           missing_configured_symbols:$configured,
           unexpected_snapshot_symbols:[],
+          excluded_symbols:[],
+          excluded_symbols_by_reason:[],
           status_reason_counts:[]
         }
       else
@@ -253,13 +267,37 @@ snapshot_summary="$(
           unexpected_snapshot_symbols:(snapshot_symbols - $configured),
           top_observed_symbols:[(.liquidity_rank_at_that_time // [])[]?.symbol_canonical][0:$expected],
           approved_symbols:[(.included_symbols // [])[]?.symbol_canonical][0:$expected],
+          excluded_symbols:[
+            (.excluded_symbols // [])[]?
+            | {
+                symbol:.symbol_canonical,
+                liquidity_rank:(.liquidity_rank // null),
+                status_reason:(.status_reason // "unknown")
+              }
+          ],
+          excluded_symbols_by_reason:(
+            (.excluded_symbols // [])
+            | group_by(.status_reason // "unknown")
+            | map({
+                reason:(.[0].status_reason // "unknown"),
+                symbols:map(.symbol_canonical),
+                count:length
+              })
+            | sort_by(.count)
+            | reverse
+          ),
           status_reason_counts:status_reason_counts
         }
       end
     ' "$snapshot_json"
 )"
 
-rollup_summary="$(jq -s -c --argjson expected "$EXPECTED_UNIVERSE_SIZE" --argjson limit "$ROLLUP_READ_LIMIT" '{
+rollup_summary="$(jq -s -c \
+  --argjson expected "$EXPECTED_UNIVERSE_SIZE" \
+  --argjson limit "$ROLLUP_READ_LIMIT" \
+  --argjson configured "$(cat "$configured_symbols_json")" '
+  . as $rollups
+  | {
   analyzed_rollup_count:length,
   expected_rollup_count:$limit,
   present_rollup_count:([.[] | select((.missing // false) == false)] | length),
@@ -273,6 +311,54 @@ rollup_summary="$(jq -s -c --argjson expected "$EXPECTED_UNIVERSE_SIZE" --argjso
   max_symbols_with_spread_samples:([.[].symbols_with_spread_samples] | max // 0),
   rollups_with_complete_symbol_coverage:([.[] | select(.symbol_count >= $expected)] | length),
   rollups_with_any_spread_samples:([.[] | select(.symbols_with_spread_samples > 0)] | length),
+  incomplete_rollups:[
+    .[]
+    | select(
+        (.symbol_count < $expected)
+        or (.symbols_with_notional < $expected)
+        or (.symbols_with_spread_samples < $expected)
+      )
+    | {
+        event_date,
+        symbol_count,
+        symbols_with_notional,
+        symbols_with_spread_samples,
+        missing_symbols:($configured - (.symbols // [])),
+        missing_notional_symbols:($configured - (.symbols_with_notional_list // [])),
+        missing_spread_symbols:($configured - (.symbols_with_spread_samples_list // []))
+      }
+  ],
+  missing_symbol_days:[
+    $configured[] as $symbol
+    | {
+        symbol:$symbol,
+        missing_event_dates:[
+          $rollups[]
+          | select(((.symbols // []) | index($symbol)) == null)
+          | .event_date
+        ],
+        missing_notional_event_dates:[
+          $rollups[]
+          | select(((.symbols_with_notional_list // []) | index($symbol)) == null)
+          | .event_date
+        ],
+        missing_spread_event_dates:[
+          $rollups[]
+          | select(((.symbols_with_spread_samples_list // []) | index($symbol)) == null)
+          | .event_date
+        ]
+      }
+    | . + {
+        missing_day_count:(.missing_event_dates | length),
+        missing_notional_day_count:(.missing_notional_event_dates | length),
+        missing_spread_day_count:(.missing_spread_event_dates | length)
+      }
+    | select(
+        .missing_day_count > 0
+        or .missing_notional_day_count > 0
+        or .missing_spread_day_count > 0
+      )
+  ],
   latest_rollups:.[0:5]
 }' "$rollup_records_json")"
 

@@ -298,6 +298,9 @@ MARKET_L1_BUCKET="nangman-crypto-dev-market-ingest-l1-<account-suffix>" \
 막혔는지 분리한다. 특히 `configured_major50_observed`, `major50_observed`,
 `major50_approved`, `missing_configured_symbols`,
 `bootstrap_spread_samples_present`, `bootstrap_symbol_coverage_incomplete`를 구분한다.
+승인에서 빠진 심볼은 `latest_snapshot.excluded_symbols_by_reason`으로, 30일
+bootstrap에서 누락된 날짜는 `recent_bootstrap_rollups.missing_symbol_days`와
+`recent_bootstrap_rollups.incomplete_rollups`로 확인한다.
 서비스 업데이트, normalize 실행, S3 쓰기, S3 삭제는 수행하지 않는다.
 
 **로컬 bootstrap admission preview**:
