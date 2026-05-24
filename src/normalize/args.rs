@@ -19,6 +19,7 @@ const DEFAULT_L0_S3_RETENTION_DAYS: i64 = 45;
 const DEFAULT_L1_S3_RETENTION_DAYS: i64 = 240;
 const DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS: u64 = 21_600;
 const DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN: usize = 1_000;
+const DEFAULT_L1_INDEX_UPLOAD_CONCURRENCY: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct NormalizeArgs {
@@ -51,6 +52,7 @@ pub struct NormalizeArgs {
     pub l1_s3_retention_days: i64,
     pub s3_retention_check_interval_secs: u64,
     pub s3_retention_max_deletes_per_run: usize,
+    pub l1_index_upload_concurrency: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +94,7 @@ pub fn parse_args(
         l1_s3_retention_days: DEFAULT_L1_S3_RETENTION_DAYS,
         s3_retention_check_interval_secs: DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS,
         s3_retention_max_deletes_per_run: DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN,
+        l1_index_upload_concurrency: DEFAULT_L1_INDEX_UPLOAD_CONCURRENCY,
     };
 
     while let Some(arg) = args.next() {
@@ -216,6 +219,10 @@ pub fn parse_args(
                 parsed.s3_retention_max_deletes_per_run =
                     parse_positive_usize(args.next(), "--s3-retention-max-deletes-per-run")?;
             }
+            "--l1-index-upload-concurrency" => {
+                parsed.l1_index_upload_concurrency =
+                    parse_positive_usize(args.next(), "--l1-index-upload-concurrency")?;
+            }
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
     }
@@ -291,7 +298,8 @@ historical catch-up work. With an explicit range, BACKFILL mode is one-shot.
 --preflight and --audit-l1-index-* are also one-shot. S3 retention cleanup is
 app-owned for both L0 and L1 buckets in long-lived worker mode. L0 defaults to
 45 days; L1 defaults to 240 days. Bucket lifecycle remains only a fallback
-safety net."#
+safety net. --l1-index-upload-concurrency controls only L1 index pointer
+publishing and defaults to 1."#
     );
 }
 
@@ -363,6 +371,7 @@ mod tests {
         assert_eq!(parsed.l1_s3_retention_days, 240);
         assert_eq!(parsed.s3_retention_check_interval_secs, 21_600);
         assert_eq!(parsed.s3_retention_max_deletes_per_run, 1_000);
+        assert_eq!(parsed.l1_index_upload_concurrency, 1);
     }
 
     #[test]
@@ -531,6 +540,20 @@ mod tests {
         assert_eq!(parsed.s3_retention_check_interval_secs, 3600);
         assert_eq!(parsed.s3_retention_max_deletes_per_run, 50);
         assert!(!parsed.s3_retention_enabled);
+    }
+
+    #[test]
+    fn parses_l1_index_upload_concurrency() {
+        let raw = vec![
+            "--l0-s3-bucket".to_owned(),
+            "l0".to_owned(),
+            "--l1-s3-bucket".to_owned(),
+            "l1".to_owned(),
+            "--l1-index-upload-concurrency".to_owned(),
+            "32".to_owned(),
+        ];
+        let parsed = parse_args(raw.into_iter()).unwrap().unwrap();
+        assert_eq!(parsed.l1_index_upload_concurrency, 32);
     }
 
     #[test]

@@ -178,6 +178,7 @@ mod tests {
             l1_s3_retention_days: 240,
             s3_retention_check_interval_secs: 21_600,
             s3_retention_max_deletes_per_run: 1_000,
+            l1_index_upload_concurrency: 1,
         }
     }
 

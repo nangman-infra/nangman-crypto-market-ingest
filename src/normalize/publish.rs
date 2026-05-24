@@ -20,6 +20,7 @@ use super::write::{
 use crate::log_stream;
 use crate::storage::StorageError;
 use crate::storage::s3_upload::S3Uploader;
+use futures_util::{StreamExt, stream};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -415,25 +416,20 @@ async fn publish_manifest_and_index(
         .await?;
     verify_manifest(uploader, &args.spool_root, l1_run_id, &manifest_key).await?;
 
-    let mut index_pointer_count = 0usize;
-    if report.status == "success" {
-        for window_start_ms in index_window_starts(input_range, args.window_ms) {
-            let pointer_key = index_pointer_key(args.window_ms, window_start_ms);
-            let pointer = index_pointer_json(
-                &manifest_key,
-                l1_run_id,
-                report.status.as_str(),
-                timing.finished_at_ms,
-                input_range,
-                window_start_ms,
-                args.window_ms,
-            );
-            uploader
-                .upload_json_if_pointer_current(&pointer_key, serde_json::to_vec_pretty(&pointer)?)
-                .await?;
-            index_pointer_count += 1;
-        }
-    }
+    let index_pointer_count = if report.status == "success" {
+        publish_index_pointers(
+            uploader,
+            args,
+            &manifest_key,
+            l1_run_id,
+            report.status.as_str(),
+            timing.finished_at_ms,
+            input_range,
+        )
+        .await?
+    } else {
+        0
+    };
 
     log_stream::info(
         "market_normalize_index_published",
@@ -562,6 +558,54 @@ fn index_window_starts(input_range: InputRange, window_ms: i64) -> Vec<i64> {
         current = next;
     }
     starts
+}
+
+async fn publish_index_pointers(
+    uploader: &S3Uploader,
+    args: &NormalizeArgs,
+    manifest_key: &str,
+    l1_run_id: &str,
+    status: &str,
+    finished_at_ms: i64,
+    input_range: InputRange,
+) -> Result<usize, Box<dyn Error>> {
+    let window_starts = index_window_starts(input_range, args.window_ms);
+    let pointer_count = window_starts.len();
+    let concurrency = args.l1_index_upload_concurrency.max(1);
+    let manifest_key = manifest_key.to_owned();
+    let l1_run_id = l1_run_id.to_owned();
+    let status = status.to_owned();
+
+    let results = stream::iter(window_starts.into_iter().map(|window_start_ms| {
+        let manifest_key = manifest_key.clone();
+        let l1_run_id = l1_run_id.clone();
+        let status = status.clone();
+        async move {
+            let pointer_key = index_pointer_key(args.window_ms, window_start_ms);
+            let pointer = index_pointer_json(
+                &manifest_key,
+                &l1_run_id,
+                status.as_str(),
+                finished_at_ms,
+                input_range,
+                window_start_ms,
+                args.window_ms,
+            );
+            uploader
+                .upload_json_if_pointer_current(&pointer_key, serde_json::to_vec_pretty(&pointer)?)
+                .await?;
+            Ok::<(), Box<dyn Error>>(())
+        }
+    }))
+    .buffer_unordered(concurrency)
+    .collect::<Vec<_>>()
+    .await;
+
+    for result in results {
+        result?;
+    }
+
+    Ok(pointer_count)
 }
 
 fn report(
