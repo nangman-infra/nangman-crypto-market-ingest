@@ -416,7 +416,7 @@ async fn publish_manifest_and_index(
         .await?;
     verify_manifest(uploader, &args.spool_root, l1_run_id, &manifest_key).await?;
 
-    let index_pointer_count = if report.status == "success" {
+    let index_pointer_count = if should_publish_index_pointers(report.status.as_str()) {
         publish_index_pointers(
             uploader,
             args,
@@ -558,6 +558,10 @@ fn index_window_starts(input_range: InputRange, window_ms: i64) -> Vec<i64> {
         current = next;
     }
     starts
+}
+
+fn should_publish_index_pointers(status: &str) -> bool {
+    matches!(status, "success" | "empty")
 }
 
 async fn publish_index_pointers(
@@ -806,6 +810,13 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn publishes_index_pointers_for_terminal_empty_outputs() {
+        assert!(should_publish_index_pointers("success"));
+        assert!(should_publish_index_pointers("empty"));
+        assert!(!should_publish_index_pointers("blocked"));
     }
 
     #[test]
