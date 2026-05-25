@@ -685,6 +685,9 @@ market_ingest_progress.health        - degraded/critical 지속 여부
 - fallback 다운로드는 `/opt/nangman-crypto/data/spool/market-normalize/catchup`.
 - L0 S3 출력은 `nangman-crypto-dev-market-ingest-l0-<account-suffix>` (override: `MARKET_L0_BUCKET`).
 - L1 normalize 출력은 `nangman-crypto-dev-market-ingest-l1-<account-suffix>` (override: `MARKET_L1_BUCKET`).
+- S3 runtime은 AWS S3 + IAM만 허용한다. `AWS_ENDPOINT_URL`,
+  `AWS_ENDPOINT_URL_S3`, `AWS_S3_FORCE_PATH_STYLE`,
+  `AWS_USE_PATH_STYLE_ENDPOINT` 같은 S3-compatible endpoint 설정은 거부한다.
 - app-owned retention: L0 = 45일, L1 = 240일, cleanup loop 주기 = 6시간.
 - bucket lifecycle은 fallback safety net: L0 = 60일, L1 = 300일, `normalized_market_slice/` = 30일 후 Standard-IA.
 - L1 universe bootstrap이 `symbol_universe_snapshot/bootstrap_rollup/*` 쓰고 읽음 (30-day point-in-time universe approval).

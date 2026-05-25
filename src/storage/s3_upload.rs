@@ -36,20 +36,18 @@ impl S3Uploader {
         region: String,
         profile: Option<String>,
     ) -> Result<Self, StorageError> {
+        let endpoint = env_s3_endpoint();
+        let force_path_style =
+            env_bool("AWS_S3_FORCE_PATH_STYLE") || env_bool("AWS_USE_PATH_STYLE_ENDPOINT");
+        validate_s3_runtime_config(endpoint.as_deref(), force_path_style)?;
+
         let mut config_loader =
             aws_config::defaults(BehaviorVersion::latest()).region(Region::new(region));
         if let Some(profile) = profile {
             config_loader = config_loader.profile_name(profile);
         }
-        if let Some(endpoint) = env_s3_endpoint() {
-            config_loader = config_loader.endpoint_url(endpoint);
-        }
         let config = config_loader.load().await;
-        let s3_config = S3ConfigBuilder::from(&config)
-            .force_path_style(
-                env_bool("AWS_S3_FORCE_PATH_STYLE") || env_bool("AWS_USE_PATH_STYLE_ENDPOINT"),
-            )
-            .build();
+        let s3_config = S3ConfigBuilder::from(&config).build();
         Ok(Self {
             client: Client::from_conf(s3_config),
             bucket,
@@ -442,6 +440,26 @@ fn env_s3_endpoint() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn validate_s3_runtime_config(
+    endpoint: Option<&str>,
+    force_path_style: bool,
+) -> Result<(), StorageError> {
+    if endpoint
+        .map(|value| !value.trim().trim_end_matches('/').is_empty())
+        .unwrap_or(false)
+    {
+        return Err(StorageError::InvalidConfig(
+            "custom S3 endpoints are unsupported; use AWS S3 with IAM".to_owned(),
+        ));
+    }
+    if force_path_style {
+        return Err(StorageError::InvalidConfig(
+            "path-style S3 endpoints are unsupported; use AWS S3 with IAM".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn env_bool(name: &str) -> bool {
     env::var(name)
         .ok()
@@ -453,6 +471,7 @@ fn env_bool(name: &str) -> bool {
 mod tests {
     use super::{
         MAX_RETRY_DELAY_MS, compact_error_message, is_retryable_put_object_code, retry_delay,
+        validate_s3_runtime_config,
     };
     use std::time::Duration;
 
@@ -484,5 +503,21 @@ mod tests {
         assert!(second > first);
         assert!(late <= Duration::from_millis(MAX_RETRY_DELAY_MS + 99));
         assert_eq!(retry_delay(2, "raw/file.parquet"), second);
+    }
+
+    #[test]
+    fn rejects_custom_s3_endpoint_config() {
+        let error = validate_s3_runtime_config(Some("https://s3.nangman.cloud"), false)
+            .expect_err("custom endpoints must be rejected");
+
+        assert!(error.to_string().contains("custom S3 endpoints"));
+    }
+
+    #[test]
+    fn rejects_path_style_s3_endpoint_mode() {
+        let error = validate_s3_runtime_config(None, true)
+            .expect_err("path-style endpoints must be rejected");
+
+        assert!(error.to_string().contains("path-style S3 endpoints"));
     }
 }
