@@ -64,23 +64,14 @@ run_repository_contract_gate() {
   ./scripts/check-repository-contract.py
 }
 
-run_compose_config_gate() {
-  log "[4/9] compose config gate"
-  NANGMAN_GIT_SHA="$(git_sha)" \
-    NANGMAN_GIT_DIRTY="$(git_dirty)" \
-    MARKET_L0_BUCKET=example-l0 \
-    MARKET_L1_BUCKET=example-l1 \
-    docker compose config >/dev/null
-}
-
 run_rust_gates() {
-  log "[5/9] cargo fmt"
+  log "[4/8] cargo fmt"
   cargo fmt --all -- --check
 
-  log "[6/9] cargo clippy"
+  log "[5/8] cargo clippy"
   cargo clippy --all-targets -- -D warnings
 
-  log "[7/9] cargo test"
+  log "[6/8] cargo test"
   cargo test --all-targets
 }
 
@@ -91,7 +82,7 @@ run_docker_gate() {
   sha="$(git_sha)"
   dirty="$(git_dirty)"
 
-  log "[8/9] Docker ${PLATFORM} build"
+  log "[7/8] Docker ${PLATFORM} build"
   docker buildx build \
     --platform "$PLATFORM" \
     --build-arg "NANGMAN_GIT_SHA=$sha" \
@@ -100,7 +91,7 @@ run_docker_gate() {
     . \
     --load
 
-  log "[9/9] Docker image smoke"
+  log "[8/8] Docker image smoke"
   local image_shape
   image_shape="$(docker image inspect "$IMAGE_TAG" --format 'OS={{.Os}} ARCH={{.Architecture}} USER={{.Config.User}} ENTRYPOINT={{json .Config.Entrypoint}}')"
   log "$image_shape"
@@ -141,7 +132,6 @@ main() {
   run_script_syntax_checks
   run_script_self_tests
   run_repository_contract_gate
-  run_compose_config_gate
   run_rust_gates
   run_docker_gate
   check_no_leftover_containers

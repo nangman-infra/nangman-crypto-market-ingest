@@ -17,7 +17,6 @@ GITIGNORE_PATH = pathlib.Path(".gitignore")
 GITHUB_DIR = pathlib.Path(".github")
 SONAR_WORKFLOW_PATH = GITHUB_DIR / "workflows" / "sonar.yml"
 SONAR_PROJECT_PATH = pathlib.Path("sonar-project.properties")
-COMPOSE_PATH = pathlib.Path("compose.yml")
 CONFIG_DIR = pathlib.Path("config")
 DOCS_DIR = pathlib.Path("docs")
 ECS_DIR = pathlib.Path("ecs")
@@ -52,7 +51,6 @@ REQUIRED_PATHS = [
     GITIGNORE_PATH,
     SONAR_WORKFLOW_PATH,
     SONAR_PROJECT_PATH,
-    COMPOSE_PATH,
     COST_CONFIG_PATH,
     EXCHANGES_CONFIG_PATH,
     UNIVERSE_CONFIG_PATH,
@@ -217,7 +215,6 @@ def check_task_definition_example(path: pathlib.Path) -> None:
 def check_required_phrases() -> None:
     readme_text = README_PATH.read_text(encoding="utf-8")
     dockerfile_text = DOCKERFILE_PATH.read_text(encoding="utf-8")
-    compose_text = COMPOSE_PATH.read_text(encoding="utf-8")
     contract_text = CONTRACT_PATH.read_text(encoding="utf-8")
 
     contract_script_phrases = [
@@ -233,8 +230,6 @@ def check_required_phrases() -> None:
         (readme_text, "linux/arm64 child digest"),
         (dockerfile_text, "ARG NANGMAN_GIT_SHA=unknown"),
         (dockerfile_text, "ARG NANGMAN_GIT_DIRTY=true"),
-        (compose_text, "NANGMAN_GIT_SHA: ${NANGMAN_GIT_SHA:-unknown}"),
-        (compose_text, "NANGMAN_GIT_DIRTY: ${NANGMAN_GIT_DIRTY:-true}"),
         (contract_text, "NATS subject emitted by market-ingest-app: none"),
         (contract_text, "downstream handoff contract is the success-only"),
         (contract_text, "capabilities.drop=[\"ALL\"]"),
@@ -256,11 +251,9 @@ def check_required_phrases() -> None:
 
 def public_roots() -> list[pathlib.Path]:
     return [
-        pathlib.Path(".env.example"),
         DOCKERIGNORE_PATH,
         GITIGNORE_PATH,
         GITHUB_DIR,
-        COMPOSE_PATH,
         CONFIG_DIR,
         DOCKERFILE_PATH,
         DOCS_DIR,
