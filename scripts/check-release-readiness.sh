@@ -47,6 +47,7 @@ run_script_syntax_checks() {
   bash -n scripts/diagnose-l1-staleness.sh
   bash -n scripts/check-universe-readiness.sh
   bash -n scripts/prepare-release-artifacts.sh
+  bash -n scripts/send-market-runtime-alert.sh
   python3 -m py_compile scripts/check-repository-contract.py
 }
 
@@ -57,6 +58,7 @@ run_script_self_tests() {
   MARKET_INGEST_RENDER_TASK_DEFINITION_SELF_TEST=1 bash scripts/render-ecs-task-definition.sh
   MARKET_INGEST_DIAGNOSE_L1_SELF_TEST=1 bash scripts/diagnose-l1-staleness.sh
   MARKET_INGEST_PREPARE_RELEASE_SELF_TEST=1 bash scripts/prepare-release-artifacts.sh
+  MARKET_INGEST_ALERT_SELF_TEST=1 bash scripts/send-market-runtime-alert.sh
 }
 
 run_repository_contract_gate() {
