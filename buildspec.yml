@@ -1,0 +1,31 @@
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: ap-northeast-2
+    IMAGE_REPO_NAME: ecr-nangman-dev-crypto-market-ingest-apn2
+    ECS_CONTAINER_NAME: crypto-market-ingest
+    DOCKER_BUILDKIT: "1"
+
+phases:
+  pre_build:
+    commands:
+      - ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+      - REPOSITORY_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_REPO_NAME}"
+      - COMMIT_SHA="${CODEBUILD_RESOLVED_SOURCE_VERSION:-manual}"
+      - SHORT_SHA="$(printf '%s' "${COMMIT_SHA}" | cut -c1-12)"
+      - IMAGE_TAG="git-${SHORT_SHA}-$(date -u +%Y%m%dT%H%M%SZ)-arm64"
+      - IMAGE_URI="${REPOSITORY_URI}:${IMAGE_TAG}"
+      - aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+  build:
+    commands:
+      - docker build --platform linux/arm64 -t "${IMAGE_URI}" .
+  post_build:
+    commands:
+      - docker push "${IMAGE_URI}"
+      - printf '[{"name":"%s","imageUri":"%s"}]' "${ECS_CONTAINER_NAME}" "${IMAGE_URI}" > imagedefinitions.json
+      - cat imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json
