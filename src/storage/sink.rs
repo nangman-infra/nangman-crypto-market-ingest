@@ -11,7 +11,10 @@ use super::partition::{
 use super::record::{RawMarketEventDraft, RawMarketEventRecord};
 use super::s3_upload::S3Uploader;
 use super::symbol_health::{SymbolHealthDraft, SymbolHealthRecord, write_symbol_health_parquet};
+use crate::live::{LiveMarketNatsConfig, LiveMarketPublisher, MarketLiveTick};
+use crate::log_stream;
 use serde::Serialize;
+use serde_json::json;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 
@@ -27,6 +30,7 @@ pub struct L0StorageConfig {
     pub run_id: String,
     pub flush_records: usize,
     pub shard_count: u16,
+    pub live_nats: Option<LiveMarketNatsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +69,7 @@ pub struct FailedUploadObject {
 pub struct L0StorageSink {
     config: L0StorageConfig,
     uploader: S3Uploader,
+    live_publisher: Option<LiveMarketPublisher>,
     raw_buffers: BTreeMap<RawPartitionKey, Vec<RawMarketEventRecord>>,
     health_buffers: BTreeMap<HealthPartitionKey, Vec<SourceHealthRecord>>,
     symbol_health_buffers: BTreeMap<SymbolHealthPartitionKey, Vec<SymbolHealthRecord>>,
@@ -92,9 +97,11 @@ impl L0StorageSink {
             config.profile.clone(),
         )
         .await?;
+        let live_publisher = connect_live_publisher(&config).await?;
         Ok(Self {
             config,
             uploader,
+            live_publisher,
             raw_buffers: BTreeMap::new(),
             health_buffers: BTreeMap::new(),
             symbol_health_buffers: BTreeMap::new(),
@@ -120,6 +127,7 @@ impl L0StorageSink {
     ) -> Result<(), StorageError> {
         let ordinal = self.take_ordinal();
         let record = RawMarketEventRecord::from_draft(draft, &self.config.run_id, ordinal);
+        self.publish_live_tick(&record).await?;
         let partition = raw_partition_for(&record, self.config.shard_count);
         let should_flush = {
             let buffer = self.raw_buffers.entry(partition.clone()).or_default();
@@ -130,6 +138,36 @@ impl L0StorageSink {
             self.flush_raw_partition(&partition).await?;
         }
         Ok(())
+    }
+
+    async fn publish_live_tick(&self, record: &RawMarketEventRecord) -> Result<(), StorageError> {
+        let Some(publisher) = &self.live_publisher else {
+            return Ok(());
+        };
+        let tick = MarketLiveTick::from_raw_market_event(record);
+        if !tick.has_mark_price() {
+            return Ok(());
+        }
+        match publisher.publish_tick(&tick).await {
+            Ok(()) => Ok(()),
+            Err(error) if live_nats_required(&self.config) => Err(StorageError::Nats(format!(
+                "publish market live tick {}: {error}",
+                tick.event_id
+            ))),
+            Err(error) => {
+                let _ = log_stream::warn(
+                    "market_live_tick_publish_failed",
+                    json!({
+                        "event_id": tick.event_id,
+                        "venue": tick.venue,
+                        "symbol": tick.symbol_canonical,
+                        "error": error.to_string(),
+                        "required": false
+                    }),
+                );
+                Ok(())
+            }
+        }
     }
 
     pub async fn append_source_health(
@@ -203,6 +241,11 @@ impl L0StorageSink {
         }
         for partition in self.gap_buffers.keys().cloned().collect::<Vec<_>>() {
             self.flush_gap_partition(&partition).await?;
+        }
+        if let Some(publisher) = &self.live_publisher {
+            publisher.flush().await.map_err(|error| {
+                StorageError::Nats(format!("flush market live publisher: {error}"))
+            })?;
         }
         Ok(())
     }
@@ -403,7 +446,60 @@ fn validate_config(config: &L0StorageConfig) -> Result<(), StorageError> {
             "l0 shard count must be positive".to_owned(),
         ));
     }
+    if let Some(live_nats) = &config.live_nats {
+        if live_nats.url.trim().is_empty() {
+            return Err(StorageError::InvalidConfig(
+                "live NATS URL must not be empty when configured".to_owned(),
+            ));
+        }
+        if live_nats.stream.trim().is_empty() {
+            return Err(StorageError::InvalidConfig(
+                "live NATS stream must not be empty when configured".to_owned(),
+            ));
+        }
+        if live_nats.subject_prefix.trim().is_empty() {
+            return Err(StorageError::InvalidConfig(
+                "live NATS subject prefix must not be empty when configured".to_owned(),
+            ));
+        }
+    }
     Ok(())
+}
+
+async fn connect_live_publisher(
+    config: &L0StorageConfig,
+) -> Result<Option<LiveMarketPublisher>, StorageError> {
+    let Some(live_nats) = &config.live_nats else {
+        return Ok(None);
+    };
+    match LiveMarketPublisher::connect(live_nats).await {
+        Ok(publisher) => Ok(Some(publisher)),
+        Err(error) if live_nats.required => Err(StorageError::Nats(format!(
+            "connect market live publisher {}: {error}",
+            live_nats.url
+        ))),
+        Err(error) => {
+            let _ = log_stream::warn(
+                "market_live_tick_publisher_disabled",
+                json!({
+                    "url": live_nats.url,
+                    "stream": live_nats.stream,
+                    "subject_prefix": live_nats.subject_prefix,
+                    "error": error.to_string(),
+                    "required": false
+                }),
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn live_nats_required(config: &L0StorageConfig) -> bool {
+    config
+        .live_nats
+        .as_ref()
+        .map(|live_nats| live_nats.required)
+        .unwrap_or(false)
 }
 
 fn append_capped<T>(values: &mut Vec<T>, value: T, max_len: usize, dropped_count: &mut usize) {

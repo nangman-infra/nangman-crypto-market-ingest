@@ -28,17 +28,26 @@ use tokio::task::JoinHandle;
 
 type SchedulerError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+struct RealtimeChild {
+    venue: String,
+    child: Child,
+}
+
 pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> {
     log_stream::info(
         "crypto_market_ingest_supervisor_start",
         json!({
-            "realtime_venue": args.realtime_venue,
+            "realtime_venue": &args.realtime_venue,
+            "realtime_venues": &args.realtime_venues,
             "bootstrap_enabled": args.bootstrap_enabled,
             "bootstrap_lookback_days": args.bootstrap_lookback_days,
             "bootstrap_chunk_hours": args.bootstrap_chunk_hours,
-            "l0_s3_bucket": args.l0_s3_bucket,
-            "l1_s3_bucket": args.l1_s3_bucket,
-            "l0_run_key_overlap_ms": args.l0_run_key_overlap_ms
+            "l0_s3_bucket": &args.l0_s3_bucket,
+            "l1_s3_bucket": &args.l1_s3_bucket,
+            "l0_run_key_overlap_ms": args.l0_run_key_overlap_ms,
+            "market_live_nats_enabled": args.live_nats_url.is_some(),
+            "market_live_nats_stream": &args.live_nats_stream,
+            "market_live_nats_subject_prefix": &args.live_nats_subject_prefix
         }),
     )?;
 
@@ -50,7 +59,7 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
         shutdown_for_task.store(true, Ordering::SeqCst);
     });
 
-    let mut realtime = spawn_realtime(&args)?;
+    let mut realtime = spawn_realtime_children(&args)?;
     let mut bootstrap_active = args.bootstrap_enabled;
     let mut normalize = if bootstrap_active {
         log_stream::info(
@@ -70,14 +79,14 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
 
     loop {
         tokio::select! {
-            realtime_status = realtime.wait() => {
-                let status = realtime_status?;
+            realtime_status = wait_any_realtime_child(&mut realtime) => {
+                let (venue, status) = realtime_status?;
                 shutdown_task.abort();
                 shutdown_requested.store(true, Ordering::SeqCst);
                 kill_optional_child(&mut normalize).await;
                 backfill_scheduler.abort();
                 abort_supervisor_retention(&mut retention_handles).await;
-                return Err(format!("realtime worker exited: {status}").into());
+                return Err(format!("realtime worker exited venue={venue}: {status}").into());
             }
             normalize_status = wait_optional_child(&mut normalize) => {
                 let status = normalize_status.expect("pending normalize wait cannot complete without a child")?;
@@ -99,7 +108,7 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
             }
             backfill_result = &mut backfill_scheduler => {
                 if shutdown_requested.load(Ordering::SeqCst) {
-                    kill_child(&mut realtime).await;
+                    kill_realtime_children(&mut realtime).await;
                     kill_optional_child(&mut normalize).await;
                     abort_supervisor_retention(&mut retention_handles).await;
                     return Ok(());
@@ -135,7 +144,7 @@ pub async fn run_supervisor(args: SupervisorArgs) -> Result<(), Box<dyn Error>> 
             _ = shutdown_signal(&shutdown_task) => {
                 shutdown_requested.store(true, Ordering::SeqCst);
                 log_stream::info("crypto_market_ingest_supervisor_shutdown", json!({}))?;
-                kill_child(&mut realtime).await;
+                kill_realtime_children(&mut realtime).await;
                 kill_optional_child(&mut normalize).await;
                 backfill_scheduler.abort();
                 abort_supervisor_retention(&mut retention_handles).await;
@@ -181,10 +190,30 @@ async fn shutdown_signal(task: &JoinHandle<()>) {
     }
 }
 
-fn spawn_realtime(args: &SupervisorArgs) -> Result<Child, Box<dyn Error>> {
-    let mut command = Command::new(&args.realtime_bin);
-    command.args(realtime_args(args));
-    spawn_child("realtime", command)
+fn spawn_realtime_children(args: &SupervisorArgs) -> Result<Vec<RealtimeChild>, Box<dyn Error>> {
+    let mut children = Vec::new();
+    for venue in &args.realtime_venues {
+        let mut command = Command::new(&args.realtime_bin);
+        command.args(realtime_args(args, venue));
+        children.push(RealtimeChild {
+            venue: venue.clone(),
+            child: spawn_child(&format!("realtime-{venue}"), command)?,
+        });
+    }
+    Ok(children)
+}
+
+async fn wait_any_realtime_child(
+    children: &mut [RealtimeChild],
+) -> std::io::Result<(String, ExitStatus)> {
+    loop {
+        for child in children.iter_mut() {
+            if let Some(status) = child.child.try_wait()? {
+                return Ok((child.venue.clone(), status));
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 fn spawn_normalize(args: &SupervisorArgs) -> Result<Child, Box<dyn Error>> {
@@ -441,6 +470,12 @@ async fn kill_child(child: &mut Child) {
         return;
     }
     let _ = child.kill().await;
+}
+
+async fn kill_realtime_children(children: &mut [RealtimeChild]) {
+    for child in children {
+        kill_child(&mut child.child).await;
+    }
 }
 
 async fn kill_optional_child(child: &mut Option<Child>) {

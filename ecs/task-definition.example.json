@@ -38,6 +38,8 @@
         "nangman-crypto-dev-market-ingest-l1-<account-suffix>",
         "--aws-region",
         "ap-northeast-2",
+        "--realtime-venues",
+        "binance,upbit",
         "--bootstrap-lookback-days",
         "210",
         "--bootstrap-chunk-hours",

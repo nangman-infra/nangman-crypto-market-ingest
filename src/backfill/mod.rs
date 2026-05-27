@@ -200,6 +200,7 @@ fn storage_config(args: &BackfillArgs) -> L0StorageConfig {
         ),
         flush_records: args.l0_flush_records,
         shard_count: args.l0_shard_count,
+        live_nats: None,
     }
 }
 

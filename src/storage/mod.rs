@@ -37,6 +37,7 @@ pub enum StorageError {
     Aws(String),
     Json(serde_json::Error),
     InvalidConfig(String),
+    Nats(String),
 }
 
 impl fmt::Display for StorageError {
@@ -48,6 +49,7 @@ impl fmt::Display for StorageError {
             Self::Aws(error) => write!(f, "storage aws error: {error}"),
             Self::Json(error) => write!(f, "storage json error: {error}"),
             Self::InvalidConfig(error) => write!(f, "storage invalid config: {error}"),
+            Self::Nats(error) => write!(f, "storage nats error: {error}"),
         }
     }
 }

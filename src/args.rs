@@ -1,3 +1,5 @@
+use crate::live::{DEFAULT_MARKET_LIVE_NATS_STREAM, DEFAULT_MARKET_LIVE_NATS_SUBJECT_PREFIX};
+use std::env;
 use std::error::Error;
 use std::path::PathBuf;
 
@@ -43,6 +45,10 @@ pub struct Args {
     pub s3_retention_days: i64,
     pub s3_retention_check_interval_secs: u64,
     pub s3_retention_max_deletes_per_run: usize,
+    pub live_nats_url: Option<String>,
+    pub live_nats_stream: String,
+    pub live_nats_subject_prefix: String,
+    pub live_nats_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +87,12 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>
         s3_retention_days: DEFAULT_S3_RETENTION_DAYS,
         s3_retention_check_interval_secs: DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS,
         s3_retention_max_deletes_per_run: DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN,
+        live_nats_url: env_string("MARKET_LIVE_NATS_URL"),
+        live_nats_stream: env_string("MARKET_LIVE_NATS_STREAM")
+            .unwrap_or_else(|| DEFAULT_MARKET_LIVE_NATS_STREAM.to_owned()),
+        live_nats_subject_prefix: env_string("MARKET_LIVE_NATS_SUBJECT_PREFIX")
+            .unwrap_or_else(|| DEFAULT_MARKET_LIVE_NATS_SUBJECT_PREFIX.to_owned()),
+        live_nats_required: env_bool("MARKET_LIVE_NATS_REQUIRED"),
     };
 
     while let Some(arg) = args.next() {
@@ -237,6 +249,25 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>
                     "--s3-retention-max-deletes-per-run",
                 )?;
             }
+            "--live-nats-url" => {
+                parsed.live_nats_url = Some(
+                    args.next()
+                        .ok_or("--live-nats-url requires a nats:// URL")?,
+                );
+            }
+            "--live-nats-stream" => {
+                parsed.live_nats_stream = args
+                    .next()
+                    .ok_or("--live-nats-stream requires a stream name")?;
+            }
+            "--live-nats-subject-prefix" => {
+                parsed.live_nats_subject_prefix = args
+                    .next()
+                    .ok_or("--live-nats-subject-prefix requires a subject prefix")?;
+            }
+            "--live-nats-required" => {
+                parsed.live_nats_required = true;
+            }
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
     }
@@ -246,11 +277,38 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>
     if let Some(bucket) = parsed.l0_s3_bucket.as_deref() {
         validate_real_bucket("--l0-s3-bucket", bucket)?;
     }
+    if let Some(url) = parsed.live_nats_url.as_deref() {
+        validate_nats_url("--live-nats-url", url)?;
+        validate_non_empty_token("--live-nats-stream", &parsed.live_nats_stream)?;
+        validate_subject_prefix(
+            "--live-nats-subject-prefix",
+            &parsed.live_nats_subject_prefix,
+        )?;
+    }
 
     if parsed.log_interval_seconds > parsed.duration_seconds {
         parsed.log_interval_seconds = parsed.duration_seconds;
     }
     Ok(Some(parsed))
+}
+
+fn env_string(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_bool(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn parse_venue(value: String) -> Result<Venue, Box<dyn Error>> {
@@ -341,6 +399,31 @@ fn validate_real_bucket(name: &str, value: &str) -> Result<(), Box<dyn Error>> {
         return Err(
             format!("{name} must be a real bucket name, not a public-doc placeholder").into(),
         );
+    }
+    Ok(())
+}
+
+fn validate_nats_url(name: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    if !value.starts_with("nats://") {
+        return Err(format!("{name} must start with nats://").into());
+    }
+    Ok(())
+}
+
+fn validate_non_empty_token(name: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    if value.trim().is_empty() {
+        return Err(format!("{name} must not be empty").into());
+    }
+    if value.contains(char::is_whitespace) {
+        return Err(format!("{name} must not contain whitespace").into());
+    }
+    Ok(())
+}
+
+fn validate_subject_prefix(name: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    validate_non_empty_token(name, value)?;
+    if value.ends_with('.') {
+        return Err(format!("{name} must not end with '.'").into());
     }
     Ok(())
 }

@@ -3,6 +3,7 @@ pub mod backfill;
 pub mod binance;
 pub mod clock;
 pub mod config;
+pub mod live;
 pub mod log_stream;
 pub mod normalize;
 pub mod reconnect;

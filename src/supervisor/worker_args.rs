@@ -1,10 +1,10 @@
 use super::BootstrapChunk;
 use super::SupervisorArgs;
 
-pub(super) fn realtime_args(args: &SupervisorArgs) -> Vec<String> {
+pub(super) fn realtime_args(args: &SupervisorArgs, venue: &str) -> Vec<String> {
     let mut values = vec![
         "--venue".to_owned(),
-        args.realtime_venue.clone(),
+        venue.to_owned(),
         "--config".to_owned(),
         args.config_dir.display().to_string(),
         "--duration-seconds".to_owned(),
@@ -28,13 +28,26 @@ pub(super) fn realtime_args(args: &SupervisorArgs) -> Vec<String> {
         "45".to_owned(),
         "--disable-s3-retention".to_owned(),
     ];
-    if args.realtime_venue == "binance" {
+    if venue == "binance" {
         values.extend([
             "--depth-snapshot-limit".to_owned(),
             "100".to_owned(),
             "--binance-futures-rest-base-url".to_owned(),
             "https://fapi.binance.com".to_owned(),
         ]);
+    }
+    if let Some(url) = &args.live_nats_url {
+        values.extend([
+            "--live-nats-url".to_owned(),
+            url.clone(),
+            "--live-nats-stream".to_owned(),
+            args.live_nats_stream.clone(),
+            "--live-nats-subject-prefix".to_owned(),
+            args.live_nats_subject_prefix.clone(),
+        ]);
+        if args.live_nats_required {
+            values.push("--live-nats-required".to_owned());
+        }
     }
     if let Some(profile) = &args.aws_profile {
         values.extend(["--aws-profile".to_owned(), profile.clone()]);

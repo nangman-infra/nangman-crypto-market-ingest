@@ -2,6 +2,7 @@ use crypto_market_data::{BinanceStreamConfig, BinanceStreamKind};
 use market_ingest_app::args::{Args, Venue, parse_args, print_help};
 use market_ingest_app::clock;
 use market_ingest_app::config::load_market_ingest_config;
+use market_ingest_app::live::LiveMarketNatsConfig;
 use market_ingest_app::log_stream;
 use market_ingest_app::storage::{
     EvictionConfig, L0StorageConfig, S3RetentionLoopEvents, UnsealedOrphanConfig,
@@ -270,5 +271,11 @@ fn l0_storage_config(args: &Args, venue: &str) -> Option<L0StorageConfig> {
         run_id: format!("market-ingest-{venue}-{}", clock::now_secs()),
         flush_records: args.l0_flush_records,
         shard_count: args.l0_shard_count,
+        live_nats: args.live_nats_url.as_ref().map(|url| LiveMarketNatsConfig {
+            url: url.clone(),
+            stream: args.live_nats_stream.clone(),
+            subject_prefix: args.live_nats_subject_prefix.clone(),
+            required: args.live_nats_required,
+        }),
     })
 }

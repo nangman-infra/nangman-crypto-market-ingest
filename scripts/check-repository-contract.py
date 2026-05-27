@@ -210,6 +210,8 @@ def check_task_definition_example(path: pathlib.Path) -> None:
     command = container.get("command", [])
     if "--l0-s3-bucket" not in command or "--l1-s3-bucket" not in command:
         fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} command must pass explicit L0/L1 buckets")
+    if "--realtime-venues" not in command:
+        fail(f"{TASK_DEFINITION_EXAMPLE_LABEL} command must pass explicit realtime venues")
 
 
 def check_required_phrases() -> None:
@@ -226,11 +228,12 @@ def check_required_phrases() -> None:
     ]
 
     required_contract_phrases = [
-        (readme_text, "market-ingest-app은 현재 NATS subject를 직접 publish하지 않는다"),
+        (readme_text, "market_live_tick.created.<venue>.<symbol>"),
         (readme_text, "linux/arm64 child digest"),
         (dockerfile_text, "ARG NANGMAN_GIT_SHA=unknown"),
         (dockerfile_text, "ARG NANGMAN_GIT_DIRTY=true"),
-        (contract_text, "NATS subject emitted by market-ingest-app: none"),
+        (contract_text, "NATS subject emitted by market-ingest-app: market_live_tick.created.<venue>.<symbol>"),
+        (contract_text, "NATS payload schema_version: market_live_tick_v1"),
         (contract_text, "downstream handoff contract is the success-only"),
         (contract_text, "capabilities.drop=[\"ALL\"]"),
         (contract_text, "runner_git_sha"),

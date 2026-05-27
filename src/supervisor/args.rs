@@ -1,3 +1,5 @@
+use crate::live::{DEFAULT_MARKET_LIVE_NATS_STREAM, DEFAULT_MARKET_LIVE_NATS_SUBJECT_PREFIX};
+use std::env;
 use std::error::Error;
 use std::path::PathBuf;
 
@@ -38,6 +40,7 @@ pub struct SupervisorArgs {
     pub backfill_bin: PathBuf,
     pub normalize_bin: PathBuf,
     pub realtime_venue: String,
+    pub realtime_venues: Vec<String>,
     pub expect_symbol_count: usize,
     pub realtime_duration_seconds: u64,
     pub log_interval_seconds: u64,
@@ -56,6 +59,10 @@ pub struct SupervisorArgs {
     pub s3_retention_check_interval_secs: u64,
     pub s3_retention_max_deletes_per_run: usize,
     pub restart_delay_secs: u64,
+    pub live_nats_url: Option<String>,
+    pub live_nats_stream: String,
+    pub live_nats_subject_prefix: String,
+    pub live_nats_required: bool,
 }
 
 pub fn parse_args(
@@ -74,6 +81,7 @@ pub fn parse_args(
         backfill_bin: PathBuf::from(DEFAULT_BACKFILL_BIN),
         normalize_bin: PathBuf::from(DEFAULT_NORMALIZE_BIN),
         realtime_venue: "binance".to_owned(),
+        realtime_venues: vec!["binance".to_owned()],
         expect_symbol_count: 50,
         realtime_duration_seconds: DEFAULT_REALTIME_DURATION_SECONDS,
         log_interval_seconds: 30,
@@ -92,6 +100,12 @@ pub fn parse_args(
         s3_retention_check_interval_secs: DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS,
         s3_retention_max_deletes_per_run: DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN,
         restart_delay_secs: DEFAULT_RESTART_DELAY_SECS,
+        live_nats_url: env_string("MARKET_LIVE_NATS_URL"),
+        live_nats_stream: env_string("MARKET_LIVE_NATS_STREAM")
+            .unwrap_or_else(|| DEFAULT_MARKET_LIVE_NATS_STREAM.to_owned()),
+        live_nats_subject_prefix: env_string("MARKET_LIVE_NATS_SUBJECT_PREFIX")
+            .unwrap_or_else(|| DEFAULT_MARKET_LIVE_NATS_SUBJECT_PREFIX.to_owned()),
+        live_nats_required: env_bool("MARKET_LIVE_NATS_REQUIRED"),
     };
 
     while let Some(arg) = args.next() {
@@ -122,6 +136,15 @@ pub fn parse_args(
             }
             "--realtime-venue" => {
                 parsed.realtime_venue = next_arg(&mut args, "--realtime-venue")?;
+                parsed.realtime_venues = vec![parsed.realtime_venue.clone()];
+            }
+            "--realtime-venues" => {
+                parsed.realtime_venues = parse_venues(&next_arg(&mut args, "--realtime-venues")?)?;
+                parsed.realtime_venue = parsed
+                    .realtime_venues
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "binance".to_owned());
             }
             "--expect-symbol-count" => {
                 parsed.expect_symbol_count =
@@ -196,15 +219,40 @@ pub fn parse_args(
                 parsed.restart_delay_secs =
                     parse_positive_u64(next_arg(&mut args, "--restart-delay-secs")?)?;
             }
+            "--live-nats-url" => {
+                parsed.live_nats_url = Some(next_arg(&mut args, "--live-nats-url")?);
+            }
+            "--live-nats-stream" => {
+                parsed.live_nats_stream = next_arg(&mut args, "--live-nats-stream")?;
+            }
+            "--live-nats-subject-prefix" => {
+                parsed.live_nats_subject_prefix =
+                    next_arg(&mut args, "--live-nats-subject-prefix")?;
+            }
+            "--live-nats-required" => {
+                parsed.live_nats_required = true;
+            }
             _ => return Err(format!("unknown supervisor argument: {arg}").into()),
         }
     }
 
-    if parsed.realtime_venue != "binance" && parsed.realtime_venue != "upbit" {
-        return Err("--realtime-venue must be binance or upbit".into());
+    if parsed.realtime_venues.is_empty() {
+        return Err("--realtime-venues requires at least one venue".into());
     }
+    for venue in &parsed.realtime_venues {
+        validate_venue(venue, "--realtime-venues")?;
+    }
+    parsed.realtime_venue = parsed.realtime_venues[0].clone();
     validate_bucket_arg(&parsed.l0_s3_bucket, "--l0-s3-bucket")?;
     validate_bucket_arg(&parsed.l1_s3_bucket, "--l1-s3-bucket")?;
+    if let Some(url) = parsed.live_nats_url.as_deref() {
+        validate_nats_url("--live-nats-url", url)?;
+        validate_non_empty_token("--live-nats-stream", &parsed.live_nats_stream)?;
+        validate_subject_prefix(
+            "--live-nats-subject-prefix",
+            &parsed.live_nats_subject_prefix,
+        )?;
+    }
     if parsed.bootstrap_lookback_days > 0 && parsed.bootstrap_chunk_hours > 24 {
         return Err("--bootstrap-chunk-hours must be <= 24 to keep recovery chunks bounded".into());
     }
@@ -214,6 +262,25 @@ pub fn parse_args(
         );
     }
     Ok(Some(parsed))
+}
+
+fn env_string(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_bool(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 pub fn print_help() {
@@ -294,4 +361,52 @@ fn parse_symbols(value: &str, name: &str) -> Result<Vec<String>, Box<dyn Error>>
         return Err(format!("{name} requires at least one symbol").into());
     }
     Ok(symbols)
+}
+
+fn parse_venues(value: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let venues = value
+        .split(',')
+        .map(str::trim)
+        .filter(|venue| !venue.is_empty())
+        .map(|venue| venue.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if venues.is_empty() {
+        return Err("--realtime-venues requires at least one venue".into());
+    }
+    for venue in &venues {
+        validate_venue(venue, "--realtime-venues")?;
+    }
+    Ok(venues)
+}
+
+fn validate_venue(value: &str, name: &str) -> Result<(), Box<dyn Error>> {
+    if value != "binance" && value != "upbit" {
+        return Err(format!("{name} must contain only binance or upbit").into());
+    }
+    Ok(())
+}
+
+fn validate_nats_url(name: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    if !value.starts_with("nats://") {
+        return Err(format!("{name} must start with nats://").into());
+    }
+    Ok(())
+}
+
+fn validate_non_empty_token(name: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    if value.trim().is_empty() {
+        return Err(format!("{name} must not be empty").into());
+    }
+    if value.contains(char::is_whitespace) {
+        return Err(format!("{name} must not contain whitespace").into());
+    }
+    Ok(())
+}
+
+fn validate_subject_prefix(name: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    validate_non_empty_token(name, value)?;
+    if value.ends_with('.') {
+        return Err(format!("{name} must not end with '.'").into());
+    }
+    Ok(())
 }

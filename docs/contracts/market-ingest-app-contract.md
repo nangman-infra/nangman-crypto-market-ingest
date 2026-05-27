@@ -12,6 +12,7 @@ The app may:
 - read public exchange market data
 - write market L0 and L1 artifacts to the configured S3 buckets
 - resume bootstrap and normalization from S3 markers and L1 success pointers
+- publish optional paper-watch live market ticks to the configured NATS JetStream stream
 - emit structured logs for runtime verification
 
 The app must not:
@@ -24,19 +25,23 @@ The app must not:
 
 ## Event Bus Boundary
 
-S3 is the canonical durable store for market data. This app currently does not
-publish NATS subjects. Its downstream handoff contract is the success-only
-`l1_index` pointer in the configured L1 bucket.
+S3 is the canonical durable store for market data. Its downstream handoff contract is the success-only `l1_index` pointer in the configured L1 bucket.
+When live NATS is configured, this app also publishes paper-watch live ticks for
+low-latency forward observation. These ticks are observational market marks only;
+they are not alpha decisions, paper admissions, live approvals, or order signals.
 
 ```text
-NATS subject emitted by market-ingest-app: none
+NATS subject emitted by market-ingest-app: market_live_tick.created.<venue>.<symbol>
+NATS stream: MARKET_LIVE
+NATS payload schema_version: market_live_tick_v1
 downstream payload pointer: MARKET_L1_BUCKET/l1_index/
 canonical payload storage: MARKET_L1_BUCKET/normalized_market_slice/
 ```
 
-If a future pointer publisher is added, that change must define the subject,
-payload schema version, idempotency key, ack/retry behavior, and replay semantics
-before deployment.
+Live NATS publishing is opt-in through `--live-nats-url` or
+`MARKET_LIVE_NATS_URL`. The default mode keeps S3 writes available even if NATS
+is unavailable. Operators may enable `--live-nats-required` only when the
+MARKET_LIVE stream is part of the release gate.
 
 ## Required Runtime Inputs
 
