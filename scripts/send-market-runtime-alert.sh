@@ -5,9 +5,12 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 APP_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 ENV_FILE="${MARKET_INGEST_ENV_FILE:-$APP_DIR/.env}"
 
-WEBHOOK_URL="${NANGMAN_ALERT_WEBHOOK_URL:-${MATTERMOST_WEBHOOK_URL:-}}"
+APP_NAME="market-ingest-app"
+AWS_REGION="${AWS_REGION:-ap-northeast-2}"
 ALERT_ENV="${NANGMAN_ALERT_ENV:-dev}"
 INCLUDE_SUCCESS="${MARKET_INGEST_ALERT_INCLUDE_SUCCESS:-false}"
+PIPELINE_ALERT_S3_BUCKET="${NANGMAN_PIPELINE_ALERT_S3_BUCKET:-${MARKET_INGEST_PIPELINE_ALERT_S3_BUCKET:-nangman-crypto-dev-market-ingest-l1-962214}}"
+PIPELINE_ALERT_S3_PREFIX="${NANGMAN_PIPELINE_ALERT_S3_PREFIX:-pipeline-alert-event/schema=pipeline_alert_event_v1}"
 
 log() {
   printf '%s\n' "$*"
@@ -35,17 +38,39 @@ json_string() {
   jq -Rn --arg value "$1" '$value'
 }
 
-send_mattermost() {
-  local text="$1"
-  if [[ -z "$WEBHOOK_URL" ]]; then
-    die "NANGMAN_ALERT_WEBHOOK_URL or MATTERMOST_WEBHOOK_URL is required"
+send_pipeline_alert() {
+  local priority="$1"
+  local title="$2"
+  local text="$3"
+  if [[ -z "$PIPELINE_ALERT_S3_BUCKET" ]]; then
+    die "NANGMAN_PIPELINE_ALERT_S3_BUCKET or MARKET_INGEST_PIPELINE_ALERT_S3_BUCKET is required"
   fi
+  local now_ms dt hour event_id key payload_file
+  now_ms="$(date -u +%s000)"
+  dt="$(date -u +%Y-%m-%d)"
+  hour="$(date -u +%H)"
+  event_id="pipeline_alert_market_ingest_${now_ms}_$$"
+  key="${PIPELINE_ALERT_S3_PREFIX%/}/dt=${dt}/hour=${hour}/app=${APP_NAME}/priority=${priority}/${event_id}.json"
+  payload_file="$(mktemp)"
   local payload
-  payload="$(jq -nc --arg text "$text" '{text:$text}')"
-  curl -fsS \
-    -H 'Content-Type: application/json' \
-    -d "$payload" \
-    "$WEBHOOK_URL" >/dev/null
+  payload="$(jq -nc \
+    --arg event_id "$event_id" \
+    --arg dedupe_key "${APP_NAME}:${priority}:${title}" \
+    --arg app "$APP_NAME" \
+    --arg env "$ALERT_ENV" \
+    --arg priority "$priority" \
+    --arg title "$title" \
+    --arg rendered_text "$text" \
+    --argjson created_at_ms "$now_ms" \
+    '{schema_version:"pipeline_alert_event_v1",event_id:$event_id,dedupe_key:$dedupe_key,app:$app,environment:$env,priority:$priority,title:$title,conclusion:"Runtime wrapper emitted a pipeline alert.",rendered_text:$rendered_text,current_state:["pre-rendered runtime alert"],reasons:[],next_actions:[],safety:["paper/live/order execution unchanged"],created_at_ms:$created_at_ms}')"
+  printf '%s\n' "$payload" > "$payload_file"
+  aws s3api put-object \
+    --region "$AWS_REGION" \
+    --bucket "$PIPELINE_ALERT_S3_BUCKET" \
+    --key "$key" \
+    --body "$payload_file" \
+    --content-type application/json >/dev/null
+  rm -f "$payload_file"
 }
 
 compact_tail() {
@@ -137,7 +162,7 @@ main() {
     return
   fi
 
-  require_command curl
+  require_command aws
   require_command jq
   require_command tail
   require_command sed
@@ -150,13 +175,13 @@ main() {
   set -e
 
   if [[ "$status" -ne 0 ]]; then
-    send_mattermost "$(failure_message "$status" "$output_file")"
+    send_pipeline_alert P1 "runtime check failed" "$(failure_message "$status" "$output_file")"
     rm -f "$output_file"
     return "$status"
   fi
 
   if is_true "$INCLUDE_SUCCESS"; then
-    send_mattermost "$(success_message "$output_file")"
+    send_pipeline_alert P3 "runtime check summary" "$(success_message "$output_file")"
   fi
   rm -f "$output_file"
 }
