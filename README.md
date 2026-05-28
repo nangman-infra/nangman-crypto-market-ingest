@@ -282,23 +282,25 @@ manifest/report/sample slice까지 읽히는지 한 번에 확인한다. S3 obje
 service update, task restart는 수행하지 않는다. 첫 실패에서 멈추지 않고 가능한
 읽기 전용 항목을 계속 검사한 뒤 마지막에 실패 목록을 요약한다.
 
-**Mattermost runtime alert wrapper**:
+**Pipeline runtime alert wrapper**:
 
 ```bash
 cd /Volumes/WD/Developments/nangman-crypto/apps/market-ingest-app
 AWS_PROFILE="${AWS_PROFILE}" \
 MARKET_L0_BUCKET="nangman-crypto-dev-market-ingest-l0-<account-suffix>" \
 MARKET_L1_BUCKET="nangman-crypto-dev-market-ingest-l1-<account-suffix>" \
-NANGMAN_ALERT_WEBHOOK_URL="<mattermost-webhook-url>" \
+NANGMAN_PIPELINE_ALERT_S3_BUCKET="nangman-crypto-dev-market-ingest-l1-<account-suffix>" \
 ./scripts/send-market-runtime-alert.sh
 ```
 
-이 wrapper는 `check-runtime.sh`를 그대로 실행하고, 실패할 때만 Mattermost로
-사람이 읽기 쉬운 P1 알림을 보낸다. 알림에는 결론, 현재 상태, 주요 원인,
-다음 행동, 안전 상태가 포함된다. 성공 알림은 기본적으로 보내지 않는다.
+이 wrapper는 `check-runtime.sh`를 그대로 실행하고, 실패할 때만
+`pipeline_alert_event_v1` S3 이벤트를 만든다. 중앙
+`lmbd-nangman-dev-pipeline-alert-apn2` Lambda가 이 이벤트를 읽어
+Mattermost로 보낸다. 알림에는 결론, 현재 상태, 주요 원인, 다음 행동,
+안전 상태가 포함된다. 성공 알림은 기본적으로 보내지 않는다.
 정상 상태 요약까지 받고 싶을 때만
 `MARKET_INGEST_ALERT_INCLUDE_SUCCESS=true`를 명시한다. 이 wrapper도 ECS update,
-task restart, S3 쓰기, paper/live/order 변경을 수행하지 않는다.
+task restart, business S3 data write, paper/live/order 변경을 수행하지 않는다.
 
 **읽기 전용 L1 staleness diagnosis**:
 
