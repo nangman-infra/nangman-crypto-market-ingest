@@ -270,9 +270,18 @@ fn syncs_diff_depth_buffer_from_rest_snapshot() {
     sync_depth_book_from_snapshot(&mut book, snapshot).unwrap();
 
     assert_eq!(book.last_update_id, Some(160));
-    assert_eq!(book.bids.get("49998.00"), Some(&"3.0".to_owned()));
-    assert_eq!(book.bids.get("49999.00"), Some(&"1.0".to_owned()));
-    assert_eq!(book.asks.get("50001.00"), Some(&"2.0".to_owned()));
+    assert_eq!(
+        book.bids.get(&FixedDecimal::new(4_999_800, 2)),
+        Some(&FixedDecimal::new(30, 1))
+    );
+    assert_eq!(
+        book.bids.get(&FixedDecimal::new(4_999_900, 2)),
+        Some(&FixedDecimal::new(10, 1))
+    );
+    assert_eq!(
+        book.asks.get(&FixedDecimal::new(5_000_100, 2)),
+        Some(&FixedDecimal::new(20, 1))
+    );
     assert!(book.buffered_events.is_empty());
 }
 

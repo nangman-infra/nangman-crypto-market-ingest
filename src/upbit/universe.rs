@@ -1,6 +1,10 @@
 use super::UpbitIngestError;
+use super::url::upbit_market_data_url;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+
+const MARKET_ALL_ENDPOINT: &str = "/v1/market/all";
+const TICKER_ALL_ENDPOINT: &str = "/v1/ticker/all";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UpbitMarket {
@@ -37,9 +41,8 @@ pub async fn fetch_top_krw_markets(
     quote_currency: &str,
     limit: usize,
 ) -> Result<Vec<UpbitMarket>, UpbitIngestError> {
-    let rest_base_url = rest_base_url.trim_end_matches('/');
-    let market_url = format!("{rest_base_url}/v1/market/all?is_details=true");
-    let ticker_url = format!("{rest_base_url}/v1/ticker/all?quote_currencies={quote_currency}");
+    let market_url = market_all_url(rest_base_url)?;
+    let ticker_url = ticker_all_url(rest_base_url, quote_currency)?;
 
     let markets = http
         .get(market_url)
@@ -91,6 +94,22 @@ pub async fn fetch_top_krw_markets(
     }
     ranked.truncate(limit);
     Ok(ranked)
+}
+
+fn market_all_url(rest_base_url: &str) -> Result<reqwest::Url, UpbitIngestError> {
+    let mut url = upbit_market_data_url(rest_base_url, MARKET_ALL_ENDPOINT)?;
+    url.query_pairs_mut().append_pair("is_details", "true");
+    Ok(url)
+}
+
+fn ticker_all_url(
+    rest_base_url: &str,
+    quote_currency: &str,
+) -> Result<reqwest::Url, UpbitIngestError> {
+    let mut url = upbit_market_data_url(rest_base_url, TICKER_ALL_ENDPOINT)?;
+    url.query_pairs_mut()
+        .append_pair("quote_currencies", quote_currency);
+    Ok(url)
 }
 
 fn active_quote_markets(markets: Vec<MarketAllEntry>, quote_currency: &str) -> Vec<MarketAllEntry> {

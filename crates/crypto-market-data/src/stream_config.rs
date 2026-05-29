@@ -67,11 +67,7 @@ impl BinanceStreamConfig {
         kinds: &[BinanceStreamKind],
     ) -> Result<String, MarketDataError> {
         let streams = self.combined_stream_names_for_kinds(kinds)?;
-        Ok(format!(
-            "{}/stream?streams={}",
-            self.base_url.trim_end_matches('/'),
-            streams.join("/")
-        ))
+        binance_combined_stream_url(&self.base_url, &streams)
     }
 
     pub fn combined_stream_names_for_kinds(
@@ -106,5 +102,136 @@ impl BinanceStreamConfig {
             .get(&raw_symbol.to_ascii_uppercase())
             .cloned()
             .ok_or_else(|| MarketDataError::UnknownSymbol(raw_symbol.to_owned()))
+    }
+}
+
+fn binance_combined_stream_url(
+    base_url: &str,
+    streams: &[String],
+) -> Result<String, MarketDataError> {
+    validate_combined_stream_names(streams)?;
+    let base = reqwest::Url::parse(base_url.trim()).map_err(|error| {
+        MarketDataError::InvalidMessage(format!("invalid Binance stream base URL: {error}"))
+    })?;
+    validate_binance_stream_base_url(&base)?;
+    Ok(format!(
+        "{}/stream?streams={}",
+        base.as_str().trim_end_matches('/'),
+        streams.join("/")
+    ))
+}
+
+fn validate_binance_stream_base_url(base: &reqwest::Url) -> Result<(), MarketDataError> {
+    if base.scheme() != "wss" {
+        return Err(MarketDataError::InvalidMessage(
+            "Binance stream base URL must use wss".to_owned(),
+        ));
+    }
+    if base.host_str().is_none() {
+        return Err(MarketDataError::InvalidMessage(
+            "Binance stream base URL must include a host".to_owned(),
+        ));
+    }
+    if !base.username().is_empty() || base.password().is_some() {
+        return Err(MarketDataError::InvalidMessage(
+            "Binance stream base URL must not include credentials".to_owned(),
+        ));
+    }
+    if base.query().is_some() || base.fragment().is_some() {
+        return Err(MarketDataError::InvalidMessage(
+            "Binance stream base URL must not include query or fragment components".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_combined_stream_names(streams: &[String]) -> Result<(), MarketDataError> {
+    for stream in streams {
+        if stream.is_empty()
+            || !stream
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'@')
+        {
+            return Err(MarketDataError::InvalidMessage(format!(
+                "invalid Binance stream name: {stream}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BinanceStreamConfig, BinanceStreamKind};
+    use crypto_domain::Symbol;
+
+    fn config_with_url(base_url: &str) -> BinanceStreamConfig {
+        BinanceStreamConfig::new(
+            base_url,
+            1_000,
+            vec![Symbol::new("binance", "BTC", "USDT", "BTCUSDT").unwrap()],
+        )
+    }
+
+    #[test]
+    fn combined_stream_url_preserves_base_path_prefix() {
+        let url = config_with_url("wss://proxy.example/binance/")
+            .combined_stream_url(BinanceStreamKind::Ticker)
+            .unwrap();
+
+        assert_eq!(
+            url,
+            "wss://proxy.example/binance/stream?streams=btcusdt@ticker"
+        );
+    }
+
+    #[test]
+    fn combined_stream_url_rejects_non_wss_base_url() {
+        let error = config_with_url("ws://stream.binance.com:9443")
+            .combined_stream_url(BinanceStreamKind::Ticker)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("wss"));
+    }
+
+    #[test]
+    fn combined_stream_url_rejects_credentials_in_base_url() {
+        let error = config_with_url("wss://user:secret@stream.binance.com:9443")
+            .combined_stream_url(BinanceStreamKind::Ticker)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("credentials"));
+    }
+
+    #[test]
+    fn combined_stream_url_rejects_query_or_fragment_in_base_url() {
+        for base_url in [
+            "wss://stream.binance.com:9443?existing=query",
+            "wss://stream.binance.com:9443#fragment",
+        ] {
+            let error = config_with_url(base_url)
+                .combined_stream_url(BinanceStreamKind::Ticker)
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains("query or fragment"));
+        }
+    }
+
+    #[test]
+    fn combined_stream_url_rejects_stream_name_with_query_separator() {
+        let config = BinanceStreamConfig::new(
+            "wss://stream.binance.com:9443",
+            1_000,
+            vec![Symbol::new("binance", "BTC", "USDT", "BTCUSDT&limit=1").unwrap()],
+        );
+        let error = config
+            .combined_stream_url(BinanceStreamKind::Ticker)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("invalid Binance stream name"));
     }
 }

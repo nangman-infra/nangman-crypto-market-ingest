@@ -1,0 +1,20 @@
+pub(super) const DEFAULT_AWS_REGION: &str = "ap-northeast-2";
+pub(super) const DEFAULT_L0_LOCAL_ROOT: &str = "/opt/nangman-crypto/data/spool/market-ingest/l0";
+pub(super) const DEFAULT_L1_SPOOL_ROOT: &str = "/opt/nangman-crypto/data/spool/market-ingest/l1";
+pub(super) const DEFAULT_CATCHUP_TMP_ROOT: &str =
+    "/opt/nangman-crypto/data/spool/market-normalize/catchup";
+pub(super) const DEFAULT_WINDOW_MS: i64 = 1_000;
+pub(super) const DEFAULT_SCHEDULE_INTERVAL_MS: i64 = 900_000;
+pub(super) const DEFAULT_SCAN_MARGIN_MS: i64 = 300_000;
+pub(super) const DEFAULT_PROJECTION_LOOKBACK_MS: i64 = 3_600_000;
+pub(super) const DEFAULT_WATERMARK_DELAY_MS: i64 = 360_000;
+pub(super) const DEFAULT_CLOCK_SKEW_MARGIN_MS: i64 = 1_000;
+pub(super) const DEFAULT_MAX_LATENCY_MS: i64 = 1_000;
+pub(super) const DEFAULT_MAX_WINDOWS_PER_TICK: usize = 192;
+pub(super) const DEFAULT_L0_RUN_KEY_OVERLAP_MS: i64 = 360_000;
+pub(super) const DEFAULT_LIVE_PRIORITY_LAG_THRESHOLD_MS: i64 = 900_000;
+pub(super) const DEFAULT_L0_S3_RETENTION_DAYS: i64 = 45;
+pub(super) const DEFAULT_L1_S3_RETENTION_DAYS: i64 = 240;
+pub(super) const DEFAULT_S3_RETENTION_CHECK_INTERVAL_SECS: u64 = 21_600;
+pub(super) const DEFAULT_S3_RETENTION_MAX_DELETES_PER_RUN: usize = 1_000;
+pub(super) const DEFAULT_L1_INDEX_UPLOAD_CONCURRENCY: usize = 1;

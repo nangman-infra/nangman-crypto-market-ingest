@@ -1,5 +1,5 @@
-use super::BootstrapChunk;
 use super::SupervisorArgs;
+use super::bootstrap::BootstrapChunk;
 
 pub(super) fn realtime_args(args: &SupervisorArgs, venue: &str) -> Vec<String> {
     let mut values = vec![
