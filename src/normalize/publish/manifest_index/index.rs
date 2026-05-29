@@ -1,4 +1,9 @@
-use super::*;
+use super::super::{
+    InputRange, NormalizeArgs, S3Uploader, SLICE_SCHEMA_VERSION, index_pointer_key,
+};
+use futures_util::{StreamExt, stream};
+use serde_json::json;
+use std::error::Error;
 
 pub(super) fn index_pointer_json(
     manifest_key: &str,

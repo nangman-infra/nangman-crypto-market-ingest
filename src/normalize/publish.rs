@@ -7,11 +7,8 @@ use super::model::{
 use super::write::{
     index_pointer_key, local_output_path, manifest_object_key, report_object_key, slice_object_key,
 };
-use crate::log_stream;
 use crate::storage::StorageError;
 use crate::storage::s3_upload::S3Uploader;
-use futures_util::{StreamExt, stream};
-use serde_json::json;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::Path;
@@ -19,8 +16,11 @@ use std::path::Path;
 mod artifacts;
 mod manifest_index;
 
-use artifacts::*;
-use manifest_index::*;
+use artifacts::{
+    publish_bootstrap_rollup_and_universe, publish_feature_deltas, publish_quality_summary,
+    publish_regime_contexts, publish_slice_parquets,
+};
+use manifest_index::publish_manifest_and_index;
 
 pub async fn publish_outputs(
     args: &NormalizeArgs,

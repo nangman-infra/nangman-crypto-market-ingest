@@ -1,4 +1,8 @@
-use super::*;
+use super::super::{
+    L1Manifest, MANIFEST_SCHEMA_VERSION, S3Uploader, StorageError, local_output_path,
+    remove_file_best_effort,
+};
+use std::path::Path;
 
 pub(super) async fn verify_manifest(
     uploader: &S3Uploader,
