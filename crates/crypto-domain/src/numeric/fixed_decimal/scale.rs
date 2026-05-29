@@ -1,10 +1,7 @@
 use super::FixedDecimal;
 use crate::DomainError;
 
-pub(super) fn align_value(
-    decimal: &FixedDecimal,
-    target_scale: u32,
-) -> Result<i128, DomainError> {
+pub(super) fn align_value(decimal: &FixedDecimal, target_scale: u32) -> Result<i128, DomainError> {
     let scale_delta = target_scale
         .checked_sub(decimal.scale)
         .ok_or(DomainError::ScaleOverflow)?;
